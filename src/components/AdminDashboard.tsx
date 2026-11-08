@@ -1,0 +1,1633 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip, ResponsiveContainer } from 'recharts';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from './ui/dropdown-menu';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
+import { Switch } from './ui/switch';
+import {
+  Users, Activity, MessageSquare, CheckSquare, Clock, CheckCircle, Trash2, Save, X, Search, Shield, Settings, Download, Filter, Lock, CreditCard, Moon, Sun, XCircle, Wallet, ChevronDown, ChevronRight, RefreshCw, UserPlus, LogIn, Upload, Send, CalendarClock, AlertTriangle, TrendingUp, PhilippinePeso, Store, ArrowUpDown, Check, Server, Link2, Cpu,
+} from 'lucide-react';
+import UniversalDatabaseService from '../services/universalDatabaseService';
+import { supportService } from '../services/supportService';
+import { supportRealtime } from '../services/supportRealtime';
+import { Ticket, User } from '../types';
+import { useOrganicDialog } from './OrganicDialog';
+import { useToast } from './ui/Toast';
+import AccountMenu from './AccountMenu';
+import AdminVerification, { VerifFilter } from './admin/AdminVerification';
+import { parseUtc, timeAgo } from '../utils/adminJobs';
+import './admin/adminConsole.css';
+import { KawayanMark } from './KawayanLogo';
+import { Sidebar, SidebarProvider, useSidebar } from './ui/sidebar';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { SideTip, SideToggle, SidebarBridge, useSideOpen } from './layout/shellSidebar';
+import KwSelect from './ui/kw-select';
+import AppHydrationLoader from './AppHydrationLoader';
+import AdminNotifications, { AdminNote } from './admin/AdminNotifications';
+import { ListSkeleton } from './ui/skeletons';
+
+interface Props {
+  darkMode: boolean;
+  toggleTheme: () => void;
+  user: User;
+  onSignOut: () => void;
+}
+
+type Tab = 'overview' | 'users' | 'verification' | 'billing' | 'helpdesk' | 'logs' | 'settings';
+
+type AdminStats = {
+  totalUsers: number;
+  activeUsers: number;
+  totalPostsGenerated: number;
+  revenue: number;
+  cancelledTransactions: number;
+  pendingTransactions: number;
+  retentionRate: number;
+  revenueData: { name: string; value: number }[];
+  churnData: { name: string; value: number; activeUsers?: number }[];
+};
+
+const EMPTY_STATS: AdminStats = {
+  totalUsers: 0, activeUsers: 0, totalPostsGenerated: 0, revenue: 0,
+  cancelledTransactions: 0, pendingTransactions: 0, retentionRate: 0, revenueData: [], churnData: [],
+};
+
+type HealthStatus = 'checking' | 'ok' | 'db-down' | 'api-down';
+type Health = { status: HealthStatus; latencyMs?: number; checkedAt?: number };
+type SystemStatus = {
+  api: { ok: boolean };
+  database: { ok: boolean; latencyMs?: number };
+  ai: { configured: boolean };
+  zernio: { configured: boolean };
+  paymongo: { configured: boolean; testMode?: boolean };
+  chat?: { configured: boolean };
+};
+
+/* ── Shared building blocks ───────────────────────────────────────── */
+const cx = (...c: Array<string | false | undefined | null>) => c.filter(Boolean).join(' ');
+const peso = (n: number) => `₱${Number(n || 0).toLocaleString('en-PH')}`;
+const isoDay = (d: Date) => d.toISOString().split('T')[0];
+const daysAgo = (n: number) => isoDay(new Date(Date.now() - n * 86_400_000));
+const tomorrow = () => isoDay(new Date(Date.now() + 86_400_000));
+
+const Panel: React.FC<{
+  title?: string; desc?: string; actions?: React.ReactNode; children: React.ReactNode; flush?: boolean; className?: string;
+}> = ({ title, desc, actions, children, flush, className }) => (
+  <section className={cx('adm-panel', className)}>
+    {(title || actions) && (
+      <header className="adm-panel__head">
+        <div className="min-w-0">
+          {title && <h2 className="adm-panel__title">{title}</h2>}
+          {desc && <p className="adm-panel__desc">{desc}</p>}
+        </div>
+        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      </header>
+    )}
+    <div className={flush ? '' : 'p-5'}>{children}</div>
+  </section>
+);
+
+const Kpi: React.FC<{
+  label: string; value: React.ReactNode; hint: string; icon: React.ElementType; accent?: boolean; onClick?: () => void;
+}> = ({ label, value, hint, icon: Icon, accent, onClick }) => {
+  const Tag = onClick ? 'button' : 'div';
+  return (
+    <Tag type={onClick ? 'button' : undefined} onClick={onClick} className={cx('adm-kpi', accent && 'adm-kpi--accent', onClick && 'adm-kpi--link')}>
+      <span className="adm-kpi__icon"><Icon className="h-4 w-4" aria-hidden /></span>
+      <span className="adm-kpi__label">{label}</span>
+      <span className="adm-kpi__value">{value}</span>
+      <span className="adm-kpi__hint">{hint}</span>
+    </Tag>
+  );
+};
+
+const AdminModal: React.FC<{ title: string; sub?: string; onClose: () => void; children: React.ReactNode }> = ({ title, sub, onClose, children }) => (
+  <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <DialogContent className="gap-0 rounded-2xl p-0 sm:max-w-md">
+      <DialogHeader className="gap-0.5 border-b border-border px-5 py-4 pr-12">
+        <DialogTitle className="font-semibold">{title}</DialogTitle>
+        {sub && <DialogDescription className="truncate text-xs">{sub}</DialogDescription>}
+      </DialogHeader>
+      <div className="p-5">{children}</div>
+    </DialogContent>
+  </Dialog>
+);
+
+const FieldLabel: React.FC<{ htmlFor?: string; children: React.ReactNode }> = ({ htmlFor, children }) => (
+  <label htmlFor={htmlFor} className="eyebrow mb-1.5 block text-(--fg-muted)">{children}</label>
+);
+
+const RoleBadge: React.FC<{ role: string }> = ({ role }) => (
+  <span className={cx('badge', role === 'admin' ? 'badge-green' : role === 'support' ? 'badge-blue' : 'badge-sage')}>{role === 'admin' ? 'Admin' : role === 'support' ? 'Support' : 'Owner'}</span>
+);
+
+const PlanBadge: React.FC<{ plan?: string }> = ({ plan = 'FREE' }) =>
+  plan === 'FREE' ? (
+    <span className="badge badge-sage">Free</span>
+  ) : (
+    <span className="badge badge-green">{plan === 'PRO' ? 'Pro' : 'Enterprise'}</span>
+  );
+
+const Empty: React.FC<{ children: React.ReactNode }> = ({ children }) => <div className="adm-empty">{children}</div>;
+
+const chartTip = {
+  borderRadius: 12,
+  border: '1px solid var(--border-strong)',
+  background: 'var(--card)',
+  color: 'var(--fg)',
+  fontSize: 12,
+  boxShadow: 'var(--shadow-md)',
+} as const;
+const axisTick = { fill: 'var(--fg-subtle)', fontSize: 11 };
+
+/* ── Audit timeline: per-action icon, color and label ────────────── */
+const ACTION_META: Record<string, { label: string; icon: React.ElementType; bg: string; fg: string; dot: string }> = {
+  register: { label: 'Account registered', icon: UserPlus, bg: 'bg-blue-500/10', fg: 'text-blue-600 dark:text-blue-400', dot: 'bg-blue-500' },
+  login: { label: 'Signed in', icon: LogIn, bg: 'bg-(--bg-alt)', fg: 'text-(--fg-muted)', dot: 'bg-(--fg-subtle)' },
+  submit_verification: { label: 'Document submitted', icon: Upload, bg: 'bg-(--amber)/10', fg: 'text-(--amber)', dot: 'bg-(--amber)' },
+  resubmit_verification: { label: 'Document resubmitted', icon: Upload, bg: 'bg-(--amber)/10', fg: 'text-(--amber)', dot: 'bg-(--amber)' },
+  approve_verification: { label: 'Verification approved', icon: CheckCircle, bg: 'bg-(--green)/10', fg: 'text-(--green-ink)', dot: 'bg-(--green)' },
+  reject_verification: { label: 'Verification rejected', icon: XCircle, bg: 'bg-[color-mix(in_srgb,var(--danger)_10%,transparent)]', fg: 'text-(--danger)', dot: 'bg-(--danger)' },
+  delete_user: { label: 'Account deleted', icon: Trash2, bg: 'bg-rose-600/10', fg: 'text-rose-700 dark:text-rose-400', dot: 'bg-rose-600' },
+  update_user: { label: 'Account changed by admin', icon: Users, bg: 'bg-(--bg-alt)', fg: 'text-(--fg-muted)', dot: 'bg-(--fg-subtle)' },
+  adjust_balance: { label: 'Wallet adjusted by admin', icon: Wallet, bg: 'bg-(--amber)/10', fg: 'text-(--amber)', dot: 'bg-(--amber)' },
+  change_plan: { label: 'Plan changed by admin', icon: CreditCard, bg: 'bg-(--bg-alt)', fg: 'text-(--fg-muted)', dot: 'bg-(--fg-subtle)' },
+  upgrade_plan: { label: 'Plan upgraded', icon: TrendingUp, bg: 'bg-(--green)/10', fg: 'text-(--green-ink)', dot: 'bg-(--green)' },
+  wallet_topup: { label: 'Wallet topped up', icon: Wallet, bg: 'bg-(--green)/10', fg: 'text-(--green-ink)', dot: 'bg-(--green)' },
+  publish_post: { label: 'Post published', icon: Send, bg: 'bg-(--green)/10', fg: 'text-(--green-ink)', dot: 'bg-(--green)' },
+  schedule_post: { label: 'Post scheduled', icon: CalendarClock, bg: 'bg-(--amber)/10', fg: 'text-(--amber)', dot: 'bg-(--amber)' },
+  post_published: { label: 'Scheduled post went live', icon: CheckCircle, bg: 'bg-(--green)/10', fg: 'text-(--green-ink)', dot: 'bg-(--green)' },
+  post_failed: { label: 'Scheduled post failed', icon: AlertTriangle, bg: 'bg-[color-mix(in_srgb,var(--danger)_10%,transparent)]', fg: 'text-(--danger)', dot: 'bg-(--danger)' },
+};
+const DEFAULT_ACTION_META = { label: 'System event', icon: Activity, bg: 'bg-(--bg-alt)', fg: 'text-(--fg-muted)', dot: 'bg-(--fg-subtle)' };
+
+const AUDIT_WINDOW = 300;
+
+const LOG_FILTERS: Array<{ key: string; label: string; actions?: string[] }> = [
+  { key: 'all', label: 'All actions' },
+  { key: 'accounts', label: 'Accounts — register & login', actions: ['register', 'login'] },
+  { key: 'submitted', label: 'Documents submitted', actions: ['submit_verification', 'resubmit_verification'] },
+  { key: 'approved', label: 'Verifications approved', actions: ['approve_verification'] },
+  { key: 'rejected', label: 'Verifications rejected', actions: ['reject_verification'] },
+  { key: 'payments', label: 'Payments & plans', actions: ['wallet_topup', 'upgrade_plan'] },
+  { key: 'deleted', label: 'Accounts deleted', actions: ['delete_user'] },
+  { key: 'publishing', label: 'Publishing — posts & outcomes', actions: ['publish_post', 'schedule_post', 'post_published', 'post_failed'] },
+];
+
+const RANGE_PRESETS = [
+  { key: '7d', label: '7D', days: 7 },
+  { key: '30d', label: '30D', days: 30 },
+  { key: '90d', label: '90D', days: 90 },
+  { key: '1y', label: '1Y', days: 365 },
+] as const;
+
+const dayLabel = (iso: string): string => {
+  const d = parseUtc(iso);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined });
+};
+
+type SearchHit = { kind: 'account' | 'verification'; id: string; label: string; sub: string };
+
+/** ⌘K search across accounts and verification submissions. */
+const AdminSearch: React.FC<{ hitsFor: (q: string) => SearchHit[]; onPick: (hit: SearchHit) => void }> = ({ hitsFor, onPick }) => {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const hits = q.trim().length >= 2 ? hitsFor(q.trim().toLowerCase()) : [];
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const pick = (hit: SearchHit) => {
+    onPick(hit);
+    setQ('');
+    setOpen(false);
+    inputRef.current?.blur();
+  };
+
+  return (
+    <div className="relative w-full max-w-md" onBlur={(e) => !e.currentTarget.contains(e.relatedTarget) && setOpen(false)}>
+      <label className="flex h-9 items-center gap-2 rounded-xl border border-(--border) bg-(--bg-alt) px-3 transition-colors focus-within:border-(--primary) focus-within:bg-(--card)">
+        <Search className="h-4 w-4 shrink-0 text-(--fg-subtle)" aria-hidden />
+        <input
+          ref={inputRef}
+          value={q}
+          onChange={(e) => { setQ(e.target.value); setOpen(true); setActive(0); }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(i + 1, hits.length - 1)); }
+            if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); }
+            if (e.key === 'Enter' && hits[active]) pick(hits[active]);
+            if (e.key === 'Escape') { setOpen(false); inputRef.current?.blur(); }
+          }}
+          placeholder="Search accounts and verifications…"
+          aria-label="Search the admin console"
+          className="min-w-0 flex-1 bg-transparent text-ui outline-hidden placeholder:text-(--fg-subtle)"
+        />
+        <kbd className="hidden rounded-md border border-(--border-strong) px-1.5 font-mono text-xs text-(--fg-subtle) sm:inline">⌘K</kbd>
+      </label>
+      {open && q.trim().length >= 2 && (
+        <ul onMouseDown={(e) => e.preventDefault()} className="absolute left-0 right-0 top-full z-50 mt-1.5 max-h-80 overflow-y-auto rounded-xl border border-(--border-strong) bg-(--card) p-1 shadow-lg" role="listbox">
+          {hits.length === 0 ? (
+            <li className="px-3 py-2 text-xs text-(--fg-muted)">No matches for “{q.trim()}”.</li>
+          ) : (
+            hits.map((hit, i) => (
+              <li key={`${hit.kind}-${hit.id}`} role="option" aria-selected={i === active}>
+                <button
+                  type="button"
+                  onClick={() => pick(hit)}
+                  onMouseEnter={() => setActive(i)}
+                  className={cx('flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-xs', i === active && 'bg-(--bg-alt)')}
+                >
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-(--bg-alt) text-(--fg-muted)">
+                    {hit.kind === 'account' ? <Users className="h-3.5 w-3.5" /> : <Shield className="h-3.5 w-3.5" />}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-semibold text-(--fg)">{hit.label}</span>
+                    <span className="block truncate text-xs text-(--fg-muted)">{hit.sub}</span>
+                  </span>
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
+};
+
+const SettingSwitch: React.FC<{ label: string; desc: string; checked: boolean; onChange: (v: boolean) => void }> = ({ label, desc, checked, onChange }) => (
+  <label className="adm-setting-row cursor-pointer">
+    <span>
+      <span className="block text-sm font-semibold text-(--fg)">{label}</span>
+      <span className="block text-xs text-(--fg-muted)">{desc}</span>
+    </span>
+    <Switch checked={checked} onCheckedChange={onChange} />
+  </label>
+);
+
+const AdminDashboard: React.FC<Props> = ({ darkMode, toggleTheme, user, onSignOut }) => {
+  const dialog = useOrganicDialog();
+  const toast = useToast();
+  const [dbService] = useState(() => new UniversalDatabaseService());
+  const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [sideOpen, chooseSideOpen] = useSideOpen();
+  const isMobile = useIsMobile();
+  const narrow = !sideOpen && !isMobile;
+  const sidebarRef = useRef<ReturnType<typeof useSidebar> | null>(null);
+
+  // Overview
+  const [stats, setStats] = useState<AdminStats>(EMPTY_STATS);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [rangePreset, setRangePreset] = useState<string>('30d');
+  const [dateRange, setDateRange] = useState({ start: daysAgo(30), end: tomorrow() });
+
+  // Data
+  const [pendingTxns, setPendingTxns] = useState<any[]>([]);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [ticketFilter, setTicketFilter] = useState<'all' | 'Open' | 'Pending' | 'Resolved'>('all');
+  const [users, setUsers] = useState<any[]>([]); // includes wallet balance and plan
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // User management
+  // The user open in the detail drawer (all account controls live there, not in the list).
+  const [drawerUserId, setDrawerUserId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editForm, setEditForm] = useState<Partial<User>>({});
+  const [searchTerm, setSearchTerm] = useState('');
+  // Newest accounts first.
+  const [sortConfig] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'createdAt', direction: 'desc' });
+  const [balanceForm, setBalanceForm] = useState({ amount: 0, reason: '' });
+  const [subForm, setSubForm] = useState({ plan: 'FREE', expiresAt: '' });
+
+  // Audit logs
+  const [logFilter, setLogFilter] = useState('all');
+  const [logSearch, setLogSearch] = useState('');
+  const [logSortDir, setLogSortDir] = useState<'asc' | 'desc'>('desc');
+
+  // Verification
+  const [verifications, setVerifications] = useState<any[]>([]);
+  const [verifLoading, setVerifLoading] = useState(false);
+  const [rejectModal, setRejectModal] = useState<{ id: string; businessName: string } | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [verifStatusFilter, setVerifStatusFilter] = useState<VerifFilter>('pending');
+  const [selectedVerifId, setSelectedVerifId] = useState<string | null>(null);
+  const [deciding, setDeciding] = useState(false); // an approve confirm is open or in flight
+
+  // Settings
+  const [health, setHealth] = useState<Health>({ status: 'checking' });
+  // Which services are set up (from GET /api/admin/system-status; flags only, never keys).
+  const [sys, setSys] = useState<SystemStatus | null>(null);
+  const [systemSettings, setSystemSettings] = useState({ maintenanceMode: false, allowRegistrations: true });
+  const [adminProfile, setAdminProfile] = useState({ email: 'admin@kawayan.ph', password: '', confirm: '' });
+
+  // A failed source shouldn't blank the whole console.
+  const safe = <T,>(p: Promise<T>, fallback: T) => p.catch((e) => { console.error('Admin data error:', e); return fallback; });
+
+  const loadStats = async () => {
+    setStatsLoading(true);
+    setStats(await safe(dbService.getAdminStats(dateRange.start, dateRange.end), EMPTY_STATS));
+    setStatsLoading(false);
+  };
+
+  const loadData = async () => {
+    const [userList, ticketList, logs, verifList, txns] = await Promise.all([
+      safe(dbService.getAllUsers(), []),
+      safe(dbService.getAllTicketsAdmin(), []),
+      safe(dbService.getAuditLogs(AUDIT_WINDOW), []),
+      safe(dbService.getAllVerifications(), []),
+      safe(dbService.getPendingTransactionsAdmin(), []),
+    ]);
+    setUsers(userList);
+    setTickets(ticketList);
+    setAuditLogs(logs);
+    setVerifications(verifList);
+    setPendingTxns(txns);
+    setLoading(false);
+  };
+
+  const refreshAll = () => Promise.all([loadStats(), loadData()]);
+
+  // Keep the bell and the permit alert current: re-check the queues every 30s while the tab is visible.
+  useEffect(() => {
+    const id = setInterval(() => { if (document.visibilityState === 'visible') loadData(); }, 30_000);
+    return () => clearInterval(id);
+  }, [dbService]);
+
+  // A permit that arrives while the console is open gets a toast (not the ones already waiting at load).
+  const seenPermits = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const pending = verifications.filter((v) => v.status === 'pending');
+    if (loading) return;
+    if (seenPermits.current) {
+      const fresh = pending.filter((v) => !seenPermits.current!.has(v.id));
+      if (fresh.length === 1) toast.info(`${fresh[0].businessName || fresh[0].email} sent a business permit to review.`);
+      else if (fresh.length > 1) toast.info(`${fresh.length} new business permits to review.`);
+    }
+    seenPermits.current = new Set(pending.map((v) => v.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [verifications, loading]);
+
+  // The permit alert bar hides until a newer permit comes in.
+  const [dismissedPermit, setDismissedPermit] = useState<string | null>(() => {
+    try { return sessionStorage.getItem('kawayan_admin_permit_alert'); } catch { return null; }
+  });
+  const dismissPermitAlert = (id: string) => {
+    setDismissedPermit(id);
+    try { sessionStorage.setItem('kawayan_admin_permit_alert', id); } catch { /* private mode */ }
+  };
+
+  useEffect(() => { loadData(); }, [dbService]);
+  useEffect(() => { loadStats(); }, [dbService, dateRange]);
+
+  // API and database health for the status pill and Settings.
+  const checkHealth = useCallback(async () => {
+    const started = performance.now();
+    let status: HealthStatus;
+    try {
+      const d = await (await fetch('/api/health')).json();
+      status = d.status === 'healthy' ? 'ok' : 'db-down';
+    } catch {
+      status = 'api-down';
+    }
+    setHealth({ status, latencyMs: Math.round(performance.now() - started), checkedAt: Date.now() });
+    try {
+      const token = localStorage.getItem('kawayan_jwt');
+      const r = await fetch('/api/admin/system-status', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      setSys(r.ok ? await r.json() : null);
+    } catch {
+      setSys(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    checkHealth();
+    const id = setInterval(checkHealth, 60_000);
+    return () => clearInterval(id);
+  }, [checkHealth]);
+
+  useEffect(() => {
+    if (activeTab === 'verification') loadVerifications();
+    if (activeTab === 'billing') loadPendingTransactions();
+  }, [activeTab]);
+
+  // Audit logs refresh quietly in the background.
+  useEffect(() => {
+    const interval = setInterval(loadAuditLogs, 8000);
+    return () => clearInterval(interval);
+  }, [dbService]);
+
+  useEffect(() => {
+    supportRealtime.connect();
+    return supportRealtime.onVerificationUpdated(() => {
+      if (activeTab === 'verification') loadVerifications();
+    });
+  }, [activeTab]);
+
+  const loadPendingTransactions = async () => {
+    setBillingLoading(true);
+    setPendingTxns(await safe(dbService.getPendingTransactionsAdmin(), []));
+    setBillingLoading(false);
+  };
+
+  const handleApproveTransaction = async (transactionId: string) => {
+    const confirmed = await dialog.confirm('Approve this payment and credit the user wallet?');
+    if (!confirmed) return;
+    try {
+      await dbService.approveTransactionAdmin(transactionId);
+      toast.success('Payment verified and balance updated');
+      loadPendingTransactions();
+      refreshAll();
+    } catch (e) {
+      toast.error('Could not approve the payment.');
+    }
+  };
+
+  const loadAuditLogs = async () => {
+    try {
+      setAuditLogs(await dbService.getAuditLogs(AUDIT_WINDOW));
+    } catch (e) {
+      console.error('Error loading audit logs:', e);
+    }
+  };
+
+  const loadVerifications = async () => {
+    setVerifLoading(true);
+    const list = await safe(dbService.getAllVerifications(), []);
+    setVerifications(list);
+    setSelectedVerifId((current) => current ?? (list[0]?.id ?? null));
+    setVerifLoading(false);
+  };
+
+  // After a decision, jump straight to the next pending item so the queue can be cleared without re-scanning the list.
+  const refreshVerificationsAndAdvance = async () => {
+    const list = await dbService.getAllVerifications();
+    setVerifications(list);
+    const nextPending = list.find((v: any) => v.status === 'pending');
+    setSelectedVerifId(nextPending ? nextPending.id : (list[0]?.id ?? null));
+  };
+
+  const handleApprove = async (id: string, businessName?: string) => {
+    if (deciding) return;
+    setDeciding(true);
+    try {
+      const confirmed = await dialog.confirm({
+        title: 'Approve verification',
+        message: `Approve ${businessName ? `"${businessName}"` : 'this business'}? They will immediately gain full account access.`,
+        confirmLabel: 'Approve',
+      });
+      if (!confirmed) return;
+      await dbService.approveVerification(id);
+      toast.success(`${businessName ? `"${businessName}"` : 'Business'} approved`);
+      await refreshVerificationsAndAdvance();
+    } catch (e) {
+      toast.error('Could not approve. Please try again.');
+    } finally {
+      setDeciding(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!rejectModal || !rejectReason.trim()) return; // the button stays disabled until a reason is typed
+    try {
+      await dbService.rejectVerification(rejectModal.id, rejectReason.trim());
+      toast.info(`"${rejectModal.businessName}" sent back`);
+      setRejectModal(null);
+      setRejectReason('');
+      await refreshVerificationsAndAdvance();
+    } catch (e) {
+      toast.error('Could not send it back. Please try again.');
+    }
+  };
+
+  // Send back from the review rail (reason + note already picked there).
+  const handleSendBack = async (v: { id: string; businessName?: string }, reason: string) => {
+    try {
+      await dbService.rejectVerification(v.id, reason);
+      toast.info(`"${v.businessName || 'Business'}" sent back`);
+      await refreshVerificationsAndAdvance();
+    } catch {
+      toast.error('Could not send it back. Please try again.');
+    }
+  };
+
+  // --- Sorting & filtering ---
+  const getFilteredAndSortedUsers = () => {
+    const q = searchTerm.toLowerCase();
+    const filtered = users.filter((u) =>
+      (u.email && u.email.toLowerCase().includes(q)) || (u.businessName && u.businessName.toLowerCase().includes(q)));
+
+    return filtered.sort((a, b) => {
+      let aVal = a[sortConfig.key] ?? '';
+      let bVal = b[sortConfig.key] ?? '';
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+      aVal = String(aVal).toLowerCase();
+      bVal = String(bVal).toLowerCase();
+      if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+  };
+
+  const getGroupedLogs = () => {
+    const q = logSearch.trim().toLowerCase();
+    const group = LOG_FILTERS.find((f) => f.key === logFilter);
+    const logs = auditLogs
+      .filter((log) => !group?.actions || group.actions.includes(log.action))
+      .filter((log) => !q || `${log.action} ${log.user_id} ${log.details || ''}`.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const diff = parseUtc(a.timestamp).getTime() - parseUtc(b.timestamp).getTime();
+        return logSortDir === 'asc' ? diff : -diff;
+      });
+    const groups: Array<{ day: string; entries: any[] }> = [];
+    for (const log of logs) {
+      const label = dayLabel(log.timestamp);
+      const last = groups[groups.length - 1];
+      if (last && last.day === label) last.entries.push(log);
+      else groups.push({ day: label, entries: [log] });
+    }
+    return groups;
+  };
+
+  // --- Export ---
+  const exportUsersToCSV = () => {
+    const cell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = [
+      ['ID', 'Email', 'Role', 'Business Name', 'Plan', 'Balance', 'Created At'],
+      ...users.map((u) => [u.id, u.email, u.role, u.businessName, u.subscription, u.balance || 0, u.createdAt]),
+    ].map((r) => r.map(cell).join(','));
+    const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `kawayan_users_${isoDay(new Date())}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // --- Actions (all from the user drawer, which stays open and shows the fresh values) ---
+  const drawerUser = users.find((u) => u.id === drawerUserId) ?? null;
+  const openUser = (u: any) => {
+    setDrawerUserId(u.id);
+    setEditForm({});
+    setBalanceForm({ amount: 0, reason: '' });
+    setSubForm({ plan: u.subscription || 'FREE', expiresAt: '' });
+    setConfirmDelete(false);
+  };
+
+  const handleUserUpdate = async (userId: string) => {
+    try {
+      await dbService.updateUser(userId, editForm);
+      toast.success('Changes saved');
+      setEditForm({});
+      loadData();
+    } catch (error) {
+      toast.error('Could not update the user.');
+    }
+  };
+
+  // Confirmed inside the drawer (a second "Delete permanently" step), since a dialog would open behind it.
+  const handleDeleteUser = async (userId: string) => {
+    try {
+      await dbService.deleteUser(userId);
+      toast.success('Account deleted');
+      setDrawerUserId(null);
+      refreshAll();
+    } catch (error) {
+      toast.error('Could not delete the user.');
+    }
+  };
+
+  const handleAdjustBalance = async () => {
+    if (!drawerUser || !balanceForm.amount) return;
+    try {
+      await dbService.adminAdjustBalance(drawerUser.id, balanceForm.amount, balanceForm.reason);
+      toast.success('Balance adjusted');
+      setBalanceForm({ amount: 0, reason: '' });
+      loadData();
+    } catch (error) {
+      toast.error('Could not adjust the balance.');
+    }
+  };
+
+  const handleUpdateSubscription = async () => {
+    if (!drawerUser) return;
+    try {
+      // The plan has no expiry date in the database yet, so none is sent.
+      await dbService.adminUpdateSubscription(drawerUser.id, subForm.plan, '');
+      toast.success('Plan updated');
+      loadData();
+    } catch (error) {
+      toast.error('Could not update the plan.');
+    }
+  };
+
+  const handleTicketStatus = async (id: string, status: 'Open' | 'Pending' | 'Resolved') => {
+    await supportService.updateTicketStatus(id, status);
+    setTickets(await safe(dbService.getAllTicketsAdmin(), tickets));
+  };
+
+  const handleAdminProfileUpdate = async () => {
+    if (adminProfile.password !== adminProfile.confirm) return; // shown under the field
+    toast.info('Admin profile updated (simulation only)');
+  };
+
+  const setDark = (wantDark: boolean) => {
+    if (wantDark !== darkMode) toggleTheme();
+  };
+
+  const pickRange = (key: string) => {
+    setRangePreset(key);
+    const preset = RANGE_PRESETS.find((p) => p.key === key);
+    if (preset) setDateRange({ start: daysAgo(preset.days), end: tomorrow() });
+  };
+
+  const reviewVerification = (id?: string) => {
+    setActiveTab('verification');
+    setVerifStatusFilter(id ? 'all' : 'pending');
+    setSelectedVerifId(id ?? verifications.find((v) => v.status === 'pending')?.id ?? null);
+  };
+
+  const searchHits = (q: string): SearchHit[] => [
+    ...users
+      .filter((u) => `${u.email} ${u.businessName || ''} ${u.id}`.toLowerCase().includes(q))
+      .slice(0, 6)
+      .map((u): SearchHit => ({ kind: 'account', id: u.id, label: u.businessName || u.email, sub: `${u.email} · ${u.role}` })),
+    ...verifications
+      .filter((v) => `${v.businessName || ''} ${v.email} ${v.id}`.toLowerCase().includes(q))
+      .slice(0, 4)
+      .map((v): SearchHit => ({ kind: 'verification', id: v.id, label: v.businessName || 'Unnamed business', sub: `${v.email} · ${v.status}` })),
+  ];
+
+  const pickSearchHit = (hit: SearchHit) => {
+    if (hit.kind === 'account') {
+      setActiveTab('users');
+      setSearchTerm(users.find((u) => u.id === hit.id)?.email ?? '');
+    } else {
+      reviewVerification(hit.id);
+    }
+  };
+
+  const pendingVerifs = verifications.filter((v) => v.status === 'pending').length;
+  const openTickets = tickets.filter((t) => t.status !== 'Resolved').length;
+  // The part of the email before "." / "+" / "@" ("mika.santos@…" → "Mika"); generic inboxes get no name.
+  const emailName = (user?.email || '').split(/[.+@]/)[0];
+  const staffFirstName = emailName && !/^(admin|support|info|hello|team)$/i.test(emailName) ? emailName[0].toUpperCase() + emailName.slice(1) : '';
+
+  const NAV: Array<{ id: Tab; label: string; icon: React.ElementType; count?: number; group: 'Workspace' | 'System' }> = [
+    { id: 'overview', label: 'Overview', icon: Activity, group: 'Workspace' },
+    { id: 'users', label: 'Users', icon: Users, count: users.length || undefined, group: 'Workspace' },
+    { id: 'verification', label: 'Verification', icon: Shield, count: pendingVerifs || undefined, group: 'Workspace' },
+    { id: 'billing', label: 'Billing', icon: CreditCard, count: pendingTxns.length || undefined, group: 'Workspace' },
+    { id: 'helpdesk', label: 'Help Desk', icon: MessageSquare, count: openTickets || undefined, group: 'Workspace' },
+    { id: 'logs', label: 'Audit Logs', icon: Clock, group: 'System' },
+    { id: 'settings', label: 'Settings', icon: Settings, group: 'System' },
+  ];
+
+  const HEADINGS: Record<Tab, { title: string; sub: string }> = {
+    overview: {
+      title: `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}${staffFirstName ? `, ${staffFirstName}` : ''}`,
+      sub: `${new Date().toLocaleDateString('en-PH', { weekday: 'long', month: 'short', day: 'numeric' })} · ${pendingVerifs} permit${pendingVerifs === 1 ? '' : 's'} and ${openTickets} ticket${openTickets === 1 ? '' : 's'} waiting.`,
+    },
+    users: { title: 'Users', sub: 'Search, edit roles, adjust wallets and manage subscriptions.' },
+    verification: { title: 'Verification', sub: 'Check each permit matches the business before approving.' },
+    billing: { title: 'Billing', sub: 'Verify pending wallet top-ups and manage billing cycles.' },
+    helpdesk: { title: 'Help desk', sub: 'Track and resolve customer support tickets.' },
+    logs: { title: 'Audit logs', sub: 'Every privileged action, timestamped.' },
+    settings: { title: 'System settings', sub: 'Platform switches, appearance and admin credentials.' },
+  };
+
+  const STATUS_PILL: Record<HealthStatus, { label: string; dot: string }> = {
+    checking: { label: 'Checking status…', dot: 'bg-(--fg-subtle)' },
+    ok: { label: 'System operational', dot: 'bg-(--success)' },
+    'db-down': { label: 'Database unreachable', dot: 'bg-(--danger)' },
+    'api-down': { label: 'API unreachable', dot: 'bg-(--danger)' },
+  };
+  const pill = STATUS_PILL[health.status];
+
+  if (loading) {
+    return (
+      <AppHydrationLoader sub="Opening the console" />
+    );
+  }
+
+  const head = HEADINGS[activeTab];
+  const refreshBtn = (fn: () => void) => (
+    <button type="button" onClick={fn} className="btn btn-glass btn-sm">
+      <RefreshCw className="h-3.5 w-3.5" /> Refresh
+    </button>
+  );
+  const signUps = stats.revenueData.reduce((sum, d) => sum + d.value, 0);
+  const visibleTickets = ticketFilter === 'all' ? tickets : tickets.filter((t) => t.status === ticketFilter);
+  const pendingTotal = pendingTxns.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+  // Overview (mockup): businesses, permits, payments, tickets; sign-ups over the last 14 days.
+  const owners = users.filter((u) => (u.role ?? 'user') === 'user');
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+  const ownersThisMonth = owners.filter((u) => u.createdAt && parseUtc(u.createdAt).getTime() >= monthStart).length;
+  const oldestPermit = verifications
+    .filter((v) => v.status === 'pending' && v.createdAt)
+    .map((v) => parseUtc(v.createdAt).getTime())
+    .sort((a, b) => a - b)[0];
+  const criticalTickets = tickets.filter((t) => t.status !== 'Resolved' && (t.priority === 'Critical' || t.priority === 'High')).length;
+  const signupDays = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (13 - i));
+    return d;
+  });
+  const pendingPermits = verifications
+    .filter((v) => v.status === 'pending')
+    .sort((a, b) => (b.createdAt ? parseUtc(b.createdAt).getTime() : 0) - (a.createdAt ? parseUtc(a.createdAt).getTime() : 0));
+  const newestPermit = pendingPermits[0];
+  const showPermitAlert = !!newestPermit && activeTab !== 'verification' && dismissedPermit !== newestPermit.id;
+  const weekAgo = Date.now() - 7 * 86_400_000;
+  const adminNotes: AdminNote[] = [
+    ...pendingPermits.map((v): AdminNote => ({
+      key: `permit-${v.id}`, Icon: Shield, tone: 'amber',
+      title: `${v.businessName || 'A business'} needs permit review`,
+      body: `${v.email || 'New account'} uploaded a business permit.`,
+      at: v.createdAt, actionLabel: 'Review permit', onAction: () => reviewVerification(v.id),
+    })),
+    ...pendingTxns.map((t): AdminNote => ({
+      key: `pay-${t.id}`, Icon: Wallet, tone: 'amber',
+      title: `Payment to verify · ${peso(t.amount)}`,
+      body: `${t.userEmail || t.userId} · ${t.description || 'Wallet top-up'}`,
+      at: t.date, actionLabel: 'Open billing', onAction: () => setActiveTab('billing'),
+    })),
+    ...tickets.filter((t) => t.status === 'Open').map((t): AdminNote => ({
+      key: `ticket-${t.id}`, Icon: MessageSquare, tone: t.priority === 'Critical' || t.priority === 'High' ? 'red' : 'muted',
+      title: `Ticket #${t.ticketNum} · ${t.priority}`,
+      body: `${t.subject} · ${t.userEmail}`,
+      at: t.createdAt, actionLabel: 'Open help desk', onAction: () => setActiveTab('helpdesk'),
+    })),
+  ];
+  const needsAction = adminNotes.length;
+  // New sign-ups are news, not to-dos: listed, but not in the red count.
+  owners
+    .filter((u) => u.createdAt && parseUtc(u.createdAt).getTime() >= weekAgo && !pendingPermits.some((v) => v.userId === u.id))
+    .sort((a, b) => parseUtc(b.createdAt).getTime() - parseUtc(a.createdAt).getTime())
+    .slice(0, 5)
+    .forEach((u) => adminNotes.push({
+      key: `signup-${u.id}`, Icon: UserPlus, tone: 'green',
+      title: `New sign-up: ${u.businessName || u.email}`,
+      body: verifications.some((v) => v.userId === u.id) ? u.email : `${u.email} · No permit uploaded yet`,
+      at: u.createdAt, actionLabel: 'View account', onAction: () => { setActiveTab('users'); setSearchTerm(u.email); },
+    }));
+  const signupBars = signupDays.map((d) => {
+    const next = d.getTime() + 86_400_000;
+    return { d, n: users.filter((u) => u.createdAt && parseUtc(u.createdAt).getTime() >= d.getTime() && parseUtc(u.createdAt).getTime() < next).length };
+  });
+  const signupMax = Math.max(1, ...signupBars.map((b) => b.n));
+  const signup14 = signupBars.reduce((a, b) => a + b.n, 0);
+  const shortDate = (d: Date) => d.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
+  type SysRow = { icon: typeof Activity; label: string; state: 'up' | 'down' | 'off' | 'checking' | 'test'; note?: string };
+  const sysRows: SysRow[] = [
+    { icon: Activity, label: 'API', state: health.status === 'checking' ? 'checking' : health.status === 'api-down' ? 'down' : 'up', note: health.latencyMs != null && health.status !== 'api-down' ? `${health.latencyMs}ms` : undefined },
+    { icon: Server, label: 'Database', state: sys ? (sys.database.ok ? 'up' : 'down') : health.status === 'checking' ? 'checking' : health.status === 'ok' ? 'up' : 'down' },
+    { icon: Cpu, label: 'AI generation', state: !sys ? 'checking' : sys.ai.configured ? 'up' : 'off' },
+    { icon: Link2, label: 'Zernio publishing', state: !sys ? 'checking' : sys.zernio.configured ? 'up' : 'off' },
+    { icon: CreditCard, label: 'PayMongo', state: !sys ? 'checking' : !sys.paymongo.configured ? 'off' : sys.paymongo.testMode ? 'test' : 'up' },
+  ];
+  const SYS_BADGE: Record<SysRow['state'], [string, string]> = {
+    up: ['badge-green', 'Set up'],
+    down: ['badge-red', 'Down'],
+    off: ['badge-red', 'Not set up'],
+    checking: ['', 'Checking…'],
+    test: ['badge-amber', 'Test mode'],
+  };
+  const allUp = sysRows.every((r) => r.state === 'up' || r.state === 'test');
+
+  return (
+    <SidebarProvider
+      open={sideOpen}
+      onOpenChange={chooseSideOpen}
+      className={cx('adm kw-shell kw-shell--staff text-sm text-(--fg)', narrow && 'is-collapsed')}
+      style={{ '--sidebar-width': '248px', '--sidebar-width-icon': '64px' } as React.CSSProperties}
+    >
+      <SidebarBridge sidebarRef={sidebarRef} />
+      {/* ── Sidebar (near-black staff console): shadcn Sidebar, icon rail when collapsed, drawer on phones ── */}
+      <Sidebar collapsible="icon" className="border-r-0!" aria-label="Sidebar">
+      <div className="kw-side kw-side--staff">
+        <div className="kw-side__biz cursor-default hover:bg-transparent!">
+          <span className="kw-side__logo" aria-hidden><KawayanMark /></span>
+          <span className="kw-side__label min-w-0 text-left">
+            <b className="block truncate">Kawayan</b>
+            <small className="block truncate">Admin console</small>
+          </span>
+        </div>
+        <nav aria-label="Admin" className="flex flex-col">
+          {(['Workspace', 'System'] as const).map((group) => (
+            <div key={group}>
+              <p className="kw-side__grp">{group}</p>
+              <div className="kw-side__menu">
+                {NAV.filter((item) => item.group === group).map((item) => (
+                  <SideTip key={item.id} label={item.count != null ? `${item.label} · ${item.count}` : item.label} show={narrow}>
+                    <button
+                      type="button"
+                      onClick={() => { setActiveTab(item.id); sidebarRef.current?.setOpenMobile(false); }}
+                      aria-current={activeTab === item.id ? 'page' : undefined}
+                      aria-label={item.count != null ? `${item.label}, ${item.count}` : item.label}
+                      className="kw-side__item"
+                    >
+                      <item.icon className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                      <span className="kw-side__label flex-1 text-left">{item.label}</span>
+                      {item.count != null && <span className="adm-nav__count kw-side__badge" aria-hidden>{item.count}</span>}
+                    </button>
+                  </SideTip>
+                ))}
+              </div>
+            </div>
+          ))}
+        </nav>
+        <div className="kw-side__quota card text-xs" role="status">
+          <p className="flex items-center gap-2 font-medium text-(--fg)">
+            <span className="relative flex h-2 w-2" aria-hidden>
+              {health.status === 'ok' && <span className={cx('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 motion-reduce:hidden', pill.dot)} />}
+              <span className={cx('relative inline-flex h-2 w-2 rounded-full', pill.dot)} />
+            </span>
+            {pill.label}
+          </p>
+          {health.latencyMs != null && <p className="text-(--fg-muted)">API and database · <span className="mono">{health.latencyMs} ms</span></p>}
+        </div>
+        <div className="kw-side__me">
+          <AccountMenu user={user} onSignOut={onSignOut} placement="sidebar" />
+        </div>
+      </div>
+      </Sidebar>
+
+      <div className="kw-inset">
+        {/* ── Top bar ── */}
+        <header className="kw-topbar">
+          <SideToggle />
+          <span className="kw-vr hidden md:block" aria-hidden />
+          <nav aria-label="Breadcrumb" className="kw-crumb hidden shrink-0 lg:flex">
+            <span>Admin</span>
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+            <b>{head.title}</b>
+          </nav>
+          <div className="flex min-w-0 flex-1 justify-end">
+            <AdminSearch hitsFor={searchHits} onPick={pickSearchHit} />
+          </div>
+          <AdminNotifications notes={adminNotes} needsAction={needsAction} />
+          {toggleTheme && (
+            <button type="button" className="kw-icon-btn" onClick={toggleTheme} aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
+              {darkMode ? <Sun className="h-4 w-4" aria-hidden /> : <Moon className="h-4 w-4" aria-hidden />}
+            </button>
+          )}
+          <span className="md:hidden">
+            <AccountMenu user={user} onSignOut={onSignOut} />
+          </span>
+        </header>
+
+        {/* Phones: tabs instead of the sidebar */}
+        <nav aria-label="Admin" className="flex gap-1 overflow-x-auto border-b border-(--border) bg-(--bg) px-3 py-2 md:hidden">
+          {NAV.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setActiveTab(item.id)}
+              aria-current={activeTab === item.id ? 'page' : undefined}
+              className="min-h-9 shrink-0 rounded-lg px-2.5 text-xs font-medium text-(--fg-muted) aria-[current=page]:bg-(--muted) aria-[current=page]:text-(--fg)"
+            >
+              {item.label}{item.count != null ? ` · ${item.count}` : ''}
+            </button>
+          ))}
+        </nav>
+
+        {/* App's <main> already wraps the console, so this is a plain region. */}
+        <div className="mx-auto w-full max-w-[1440px] min-w-0 flex-1 p-4 md:p-6">
+          {showPermitAlert && (
+            <div className="kw-alert kw-alert--warn mb-4 items-center" role="status">
+              <Shield className="h-4 w-4 shrink-0" aria-hidden />
+              <span className="min-w-0 flex-1 text-(--fg)">
+                New registration: <b>{newestPermit.businessName || newestPermit.email}</b> sent a business permit{newestPermit.createdAt ? ` ${timeAgo(newestPermit.createdAt)}` : ''} and is waiting for review.
+                {pendingPermits.length > 1 && <span className="text-(--fg-muted)"> {pendingPermits.length - 1} more waiting.</span>}
+              </span>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => reviewVerification(newestPermit.id)}>Review now</button>
+              <button type="button" className="kw-icon-btn h-8 w-8" aria-label="Dismiss" onClick={() => dismissPermitAlert(newestPermit.id)}><X className="h-4 w-4" aria-hidden /></button>
+            </div>
+          )}
+          <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">{head.title}</h1>
+              <p className="mt-0.5 text-ui text-(--fg-muted)">{head.sub}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {activeTab === 'overview' && (
+                <>
+                  {pendingVerifs > 0 && (
+                    <button type="button" className="btn btn-primary btn-sm" onClick={() => reviewVerification()}>
+                      <Shield className="h-3.5 w-3.5" aria-hidden /> Review permits
+                    </button>
+                  )}
+                  <div className="adm-segment" role="group" aria-label="Date range">
+                    {RANGE_PRESETS.map((p) => (
+                      <button key={p.key} type="button" aria-pressed={rangePreset === p.key} onClick={() => pickRange(p.key)}>{p.label}</button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1.5 rounded-xl border border-(--border) bg-(--card) px-2 py-1">
+                    <input
+                      type="date"
+                      aria-label="Start date"
+                      value={dateRange.start}
+                      onChange={(e) => { setRangePreset('custom'); setDateRange({ ...dateRange, start: e.target.value }); }}
+                      className="bg-transparent text-xs text-(--fg) outline-hidden"
+                    />
+                    <span className="text-(--fg-subtle)">–</span>
+                    <input
+                      type="date"
+                      aria-label="End date"
+                      value={dateRange.end}
+                      onChange={(e) => { setRangePreset('custom'); setDateRange({ ...dateRange, end: e.target.value }); }}
+                      className="bg-transparent text-xs text-(--fg) outline-hidden"
+                    />
+                  </div>
+                  {refreshBtn(refreshAll)}
+                </>
+              )}
+              {activeTab === 'users' && (
+                <button type="button" onClick={exportUsersToCSV} className="btn btn-glass btn-sm">
+                  <Download className="h-3.5 w-3.5" /> Export CSV
+                </button>
+              )}
+              {activeTab === 'verification' && refreshBtn(loadVerifications)}
+              {activeTab === 'billing' && refreshBtn(loadPendingTransactions)}
+            </div>
+          </div>
+
+          {/* ─────────────  OVERVIEW  ───────────── */}
+          {activeTab === 'overview' && (
+            <div className={cx('space-y-4 transition-opacity', statsLoading && 'opacity-60')} aria-busy={statsLoading}>
+              <div className="kw-stats">
+                <button type="button" className="card kw-stat text-left" onClick={() => setActiveTab('users')}>
+                  <span className="kw-stat__h">Businesses <Users className="h-4 w-4" aria-hidden /></span>
+                  <b>{owners.length.toLocaleString()}</b>
+                  <small>{ownersThisMonth ? <><span className="text-(--green-ink)">+{ownersThisMonth}</span> this month</> : 'None new this month'}</small>
+                </button>
+                <button type="button" className="card kw-stat text-left" onClick={() => reviewVerification()}>
+                  <span className="kw-stat__h">Permits to review <Shield className="h-4 w-4" aria-hidden /></span>
+                  <b>{pendingVerifs}</b>
+                  <small>{oldestPermit ? `Oldest ${timeAgo(new Date(oldestPermit).toISOString())}` : 'All caught up'}</small>
+                </button>
+                <button type="button" className="card kw-stat text-left" onClick={() => setActiveTab('billing')}>
+                  <span className="kw-stat__h">Payments to verify <Wallet className="h-4 w-4" aria-hidden /></span>
+                  <b>{pendingTxns.length}</b>
+                  <small>{pendingTxns.length ? `${peso(pendingTotal)} total` : 'Nothing waiting'}</small>
+                </button>
+                <button type="button" className="card kw-stat text-left" onClick={() => setActiveTab('helpdesk')}>
+                  <span className="kw-stat__h">Open tickets <MessageSquare className="h-4 w-4" aria-hidden /></span>
+                  <b>{openTickets}</b>
+                  <small>{criticalTickets ? `${criticalTickets} high or critical` : 'None urgent'}</small>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <section className="card overflow-hidden">
+                  <div className="kw-card-h">
+                    <h3>Sign-ups, last 14 days</h3>
+                    <span className="kw-hint mono">{signup14} total</span>
+                  </div>
+                  <div className="p-5">
+                    <div className="flex h-[180px] items-end gap-1.5" role="img" aria-label={`Sign-ups per day, last 14 days: ${signupBars.map((b) => b.n).join(', ')}`}>
+                      {signupBars.map((b, i) => (
+                        <div key={i} className="flex h-full flex-1 flex-col items-center justify-end gap-1.5" title={`${shortDate(b.d)}: ${b.n}`}>
+                          <span className="mono text-[10px] text-(--fg-muted)">{b.n}</span>
+                          <i
+                            className="block w-full rounded-t"
+                            style={{ height: `${Math.max(2, (b.n / signupMax) * 140)}px`, background: i === signupBars.length - 1 ? 'var(--green)' : 'color-mix(in srgb, var(--fg) 12%, transparent)' }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mono mt-1.5 flex justify-between text-[11px] text-(--fg-muted)">
+                      <span>{shortDate(signupDays[0])}</span>
+                      <span>{shortDate(signupDays[13])}</span>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="card overflow-hidden">
+                  <div className="kw-card-h">
+                    <h3>System status</h3>
+                    <span className={cx('badge', allUp ? 'badge-green' : 'badge-amber')}><span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />{allUp ? 'Operational' : 'Needs a look'}</span>
+                  </div>
+                  <ul className="divide-y divide-(--border)">
+                    {sysRows.map((r) => (
+                      <li key={r.label} className="flex items-center gap-3 px-5 py-3">
+                        <r.icon className="h-4 w-4 text-(--fg-muted)" aria-hidden />
+                        <span className="flex-1 text-ui">{r.label}</span>
+                        <span className={cx('badge', SYS_BADGE[r.state][0])}>
+                          {r.state !== 'checking' && <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />}
+                          {r.state === 'up' && r.note ? `Up · ${r.note}` : r.state === 'up' && r.label === 'Database' ? 'Up' : SYS_BADGE[r.state][1]}
+                        </span>
+                      </li>
+                    ))}
+                    <li className="flex items-center gap-3 px-5 py-3">
+                      <UserPlus className="h-4 w-4 text-(--fg-muted)" aria-hidden />
+                      <label htmlFor="adm-allow-reg" className="flex-1 text-ui">Allow registrations</label>
+                      <Switch
+                        id="adm-allow-reg"
+                        checked={systemSettings.allowRegistrations}
+                        onCheckedChange={(v) => setSystemSettings({ ...systemSettings, allowRegistrations: v })}
+                      />
+                    </li>
+                  </ul>
+                </section>
+              </div>
+
+              <h2 className="pt-2 text-sm font-semibold text-(--fg-muted)">For the dates above</h2>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+                <Kpi accent icon={PhilippinePeso} label="Total revenue" value={peso(stats.revenue)} hint="Completed PayMongo payments" />
+                <Kpi icon={Users} label="Total users" value={stats.totalUsers.toLocaleString()} hint="Signed up in this range" onClick={() => setActiveTab('users')} />
+                <Kpi icon={Store} label="MSME accounts" value={stats.activeUsers.toLocaleString()} hint="Business owners who joined" />
+                <Kpi icon={TrendingUp} label="Posts created" value={stats.totalPostsGenerated.toLocaleString()} hint="Across all businesses" />
+                <Kpi icon={Wallet} label="Pending" value={stats.pendingTransactions.toLocaleString()} hint="Payments not yet paid" onClick={() => setActiveTab('billing')} />
+                <Kpi icon={XCircle} label="Cancelled" value={stats.cancelledTransactions.toLocaleString()} hint="Payments cancelled" />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                <Panel
+                  className="lg:col-span-2"
+                  title="User growth"
+                  desc="New sign-ups per month"
+                  actions={<span className="adm-figure">{signUps.toLocaleString()}<small>sign-ups</small></span>}
+                >
+                  <div className="h-64">
+                    {stats.revenueData.length === 0 ? (
+                      <Empty>No sign-ups in this range.</Empty>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={stats.revenueData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="admGrowth" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="var(--primary)" stopOpacity={0.28} />
+                              <stop offset="100%" stopColor="var(--primary)" stopOpacity={0} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
+                          <XAxis dataKey="name" axisLine={false} tickLine={false} tick={axisTick} />
+                          <YAxis axisLine={false} tickLine={false} tick={axisTick} width={36} allowDecimals={false} />
+                          <ChartTooltip contentStyle={chartTip} formatter={(v) => [v, 'Sign-ups']} cursor={{ stroke: 'var(--border-strong)' }} />
+                          <Area type="monotone" dataKey="value" stroke="var(--primary)" strokeWidth={2.5} fill="url(#admGrowth)" activeDot={{ r: 5 }} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </Panel>
+
+                <Panel
+                  title="Retention rate"
+                  desc="Share of users who posted each month"
+                  actions={<span className="adm-figure">{stats.retentionRate}%<small>last 30 days</small></span>}
+                >
+                  <div className="h-64">
+                    {stats.churnData.length === 0 ? (
+                      <Empty>No posting activity in this range.</Empty>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={stats.churnData} margin={{ top: 8, right: 4, left: -8, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
+                          <XAxis dataKey="name" axisLine={false} tickLine={false} tick={axisTick} />
+                          <YAxis axisLine={false} tickLine={false} tick={axisTick} unit="%" width={40} />
+                          <ChartTooltip contentStyle={chartTip} formatter={(v) => [`${v}%`, 'Retention']} cursor={{ fill: 'var(--bg-alt)' }} />
+                          <Bar dataKey="value" fill="var(--kw-sage)" radius={[8, 8, 0, 0]} maxBarSize={44} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </Panel>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                <Panel
+                  flush
+                  className="lg:col-span-2"
+                  title="Latest activity"
+                  actions={
+                    <button type="button" onClick={() => setActiveTab('logs')} className="flex min-h-6 items-center gap-1 text-xs font-semibold text-(--primary) hover:underline">
+                      View all <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                  }
+                >
+                  <ul className="divide-y divide-(--border)">
+                    {auditLogs.slice(0, 6).map((log) => {
+                      const meta = ACTION_META[log.action] || DEFAULT_ACTION_META;
+                      const Icon = meta.icon;
+                      return (
+                        <li key={log.id} className="flex items-center gap-3 px-5 py-3">
+                          <span className={cx('grid h-9 w-9 shrink-0 place-items-center rounded-xl', meta.bg)}>
+                            <Icon className={cx('h-4 w-4', meta.fg)} />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold">{meta.label}</span>
+                            <span className="block truncate text-xs text-(--fg-muted)">{log.details || log.user_id}</span>
+                          </span>
+                          <span className="whitespace-nowrap text-xs text-(--fg-subtle)" title={parseUtc(log.timestamp).toLocaleString()}>{timeAgo(log.timestamp)}</span>
+                        </li>
+                      );
+                    })}
+                    {auditLogs.length === 0 && <li><Empty>No activity recorded yet.</Empty></li>}
+                  </ul>
+                </Panel>
+
+                <Panel flush title="Needs attention" desc="Work waiting on an admin">
+                  <ul className="divide-y divide-(--border)">
+                    {[
+                      { icon: Shield, label: 'Verifications to review', count: pendingVerifs, go: () => reviewVerification() },
+                      { icon: Wallet, label: 'Payments to verify', count: pendingTxns.length, go: () => setActiveTab('billing') },
+                      { icon: MessageSquare, label: 'Open support tickets', count: openTickets, go: () => setActiveTab('helpdesk') },
+                    ].map((row) => (
+                      <li key={row.label}>
+                        <button type="button" onClick={row.go} className="flex w-full items-center gap-3 px-5 py-3.5 text-left transition-colors hover:bg-(--bg-alt)">
+                          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-(--bg-alt) text-(--fg-muted)">
+                            <row.icon className="h-4 w-4" />
+                          </span>
+                          <span className="flex-1 text-sm font-medium">{row.label}</span>
+                          <span className={cx('rounded-full px-2.5 py-0.5 text-xs font-semibold tabular-nums', row.count ? 'bg-(--amber)/15 text-(--amber)' : 'bg-(--bg-alt) text-(--fg-subtle)')}>
+                            {row.count}
+                          </span>
+                          <ChevronRight className="h-4 w-4 text-(--fg-subtle)" aria-hidden />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </Panel>
+              </div>
+            </div>
+          )}
+
+          {/* ─────────────  USERS  ───────────── */}
+          {activeTab === 'users' && (
+            <Panel flush>
+              <div className="flex flex-wrap items-center gap-3 border-b border-(--border) px-4 py-3">
+                <label className="flex h-9 w-full max-w-xs items-center gap-2 rounded-xl border border-(--border) bg-(--bg-alt) px-3 focus-within:border-(--primary)">
+                  <Search className="h-4 w-4 text-(--fg-subtle)" aria-hidden />
+                  <input
+                    type="text"
+                    placeholder="Search by email or business…"
+                    aria-label="Search users"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="min-w-0 flex-1 bg-transparent text-ui outline-hidden placeholder:text-(--fg-subtle)"
+                  />
+                </label>
+                <span className="ml-auto text-xs text-(--fg-muted)">{getFilteredAndSortedUsers().length} of {users.length} accounts</span>
+              </div>
+              {/* Master list: who, their business and plan, and a chevron. Everything else is in the drawer. */}
+              <div className="adm-ulist" role="list" aria-label="Accounts">
+                <div className="adm-ulist__head" aria-hidden>
+                  <span>User</span>
+                  <span>Business</span>
+                  <span>Plan</span>
+                  <span />
+                </div>
+                {getFilteredAndSortedUsers().map((u) => (
+                  <div key={u.id} role="listitem">
+                    <button type="button" className="adm-urow" aria-current={drawerUserId === u.id ? 'true' : undefined} onClick={() => openUser(u)}>
+                      <span className="flex min-w-0 items-center gap-3">
+                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-(--muted) text-xs font-semibold uppercase text-(--fg)">
+                          {(u.businessName || u.email || '?').charAt(0)}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium text-(--fg)">{u.email}</span>
+                          <span className="mono block truncate text-xs text-(--fg-subtle)">{u.id}</span>
+                        </span>
+                      </span>
+                      <span className="adm-urow__biz">{u.businessName || '—'}</span>
+                      <span className="adm-urow__plan">{u.role === 'user' ? <PlanBadge plan={u.subscription} /> : <RoleBadge role={u.role} />}</span>
+                      <ChevronRight className="h-4 w-4 text-(--fg-subtle)" aria-hidden />
+                    </button>
+                  </div>
+                ))}
+                {getFilteredAndSortedUsers().length === 0 && <Empty>No users match your search.</Empty>}
+              </div>
+            </Panel>
+          )}
+
+          {/* ─────────────  VERIFICATION — review queue  ───────────── */}
+          {activeTab === 'verification' && (
+            <AdminVerification
+              verifications={verifications}
+              loading={verifLoading}
+              filter={verifStatusFilter}
+              onFilter={setVerifStatusFilter}
+              selectedId={selectedVerifId}
+              onSelect={setSelectedVerifId}
+              onApprove={(v) => handleApprove(v.id, v.businessName)}
+              onReject={(v) => {
+                setRejectModal({ id: v.id, businessName: v.businessName });
+                setRejectReason('');
+              }}
+              onSendBack={handleSendBack}
+              paused={!!rejectModal || deciding}
+            />
+          )}
+
+          {/* ─────────────  BILLING  ───────────── */}
+          {activeTab === 'billing' && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 md:max-w-xl">
+                <Kpi icon={Wallet} label="Pending payments" value={pendingTxns.length} hint="Waiting to be verified" />
+                <Kpi icon={PhilippinePeso} label="Pending amount" value={peso(pendingTotal)} hint="Across all pending payments" />
+              </div>
+              <Panel flush title="Pending payments" desc="Top-ups and plan payments that haven't been confirmed yet.">
+                {billingLoading ? (
+                  <ListSkeleton />
+                ) : pendingTxns.length === 0 ? (
+                  <Empty>No pending transactions — all payments verified.</Empty>
+                ) : (
+                  <div className="adm-table-wrap">
+                    <table className="adm-table">
+                      <thead>
+                        <tr><th>User</th><th>Description</th><th>Amount</th><th>Date</th><th>Status</th><th className="text-right">Action</th></tr>
+                      </thead>
+                      <tbody>
+                        {pendingTxns.map((txn) => (
+                          <tr key={txn.id}>
+                            <td>
+                              <p className="adm-table__primary">{txn.userEmail || txn.userId}</p>
+                              <p className="adm-table__mono">{txn.id}</p>
+                            </td>
+                            <td className="text-(--fg-muted)">{txn.description}</td>
+                            <td className="adm-table__money">{peso(txn.amount)}</td>
+                            <td className="text-xs text-(--fg-subtle)">{parseUtc(txn.date).toLocaleString()}</td>
+                            <td><span className="badge badge-amber">{txn.status}</span></td>
+                            <td className="text-right">
+                              <button type="button" onClick={() => handleApproveTransaction(txn.id)} className="btn btn-primary btn-sm">
+                                <Check className="h-3.5 w-3.5" /> Verify payment
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <div className="border-t border-(--border) px-5 py-3 text-xs text-(--fg-muted)">
+                  Manage each user's plan and billing cycle from the{' '}
+                  <button type="button" onClick={() => setActiveTab('users')} className="inline-flex min-h-6 items-center font-semibold text-(--primary) hover:underline">Users</button> tab.
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {/* ─────────────  HELP DESK  ───────────── */}
+          {activeTab === 'helpdesk' && (
+            <Panel flush>
+              <div className="flex flex-wrap items-center gap-2 border-b border-(--border) px-4 py-3">
+                <div className="adm-segment" role="group" aria-label="Filter by status">
+                  {(['all', 'Open', 'Pending', 'Resolved'] as const).map((s) => (
+                    <button key={s} type="button" aria-pressed={ticketFilter === s} onClick={() => setTicketFilter(s)}>
+                      {s === 'all' ? 'All' : s} <span className="tabular-nums opacity-60">{s === 'all' ? tickets.length : tickets.filter((t) => t.status === s).length}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="adm-table-wrap">
+                <table className="adm-table">
+                  <thead>
+                    <tr><th>Ticket</th><th>User</th><th>Subject</th><th>Category</th><th>Priority</th><th>Status</th><th className="text-right">Action</th></tr>
+                  </thead>
+                  <tbody>
+                    {visibleTickets.length === 0 ? (
+                      <tr><td colSpan={7}><Empty>No tickets here.</Empty></td></tr>
+                    ) : visibleTickets.map((ticket) => (
+                      <tr key={ticket.id}>
+                        <td className="adm-table__mono">#{ticket.ticketNum}</td>
+                        <td className="text-xs text-(--fg-muted)">{ticket.userEmail}</td>
+                        <td className="adm-table__primary">{ticket.subject}</td>
+                        <td>
+                          <span className={cx('badge', ticket.category === 'Billing' ? 'badge-green' : ticket.category === 'Technical' ? 'badge-amber' : 'badge-sage')}>
+                            {ticket.category || 'General'}
+                          </span>
+                        </td>
+                        <td>
+                          <span className={cx('badge', ticket.priority === 'Critical' ? 'badge-red' : ticket.priority === 'High' ? 'badge-amber' : 'badge-blue')}>{ticket.priority}</span>
+                        </td>
+                        <td><span className={cx('badge', ticket.status === 'Open' ? 'badge-green' : 'badge-sage')}>{ticket.status}</span></td>
+                        <td className="text-right">
+                          {ticket.status !== 'Resolved' && (
+                            <button type="button" onClick={() => handleTicketStatus(ticket.id, 'Resolved')} className="btn btn-outline btn-sm">
+                              <CheckSquare className="h-3.5 w-3.5" /> Resolve
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Panel>
+          )}
+
+          {/* ─────────────  AUDIT LOGS — activity timeline  ───────────── */}
+          {activeTab === 'logs' && (
+            <div className="space-y-4">
+              <div className="adm-panel flex flex-wrap items-center gap-2.5 p-3">
+                <label className="flex h-9 min-w-[200px] flex-1 items-center gap-2 rounded-xl border border-(--border) bg-(--bg-alt) px-3 focus-within:border-(--primary)">
+                  <Search className="h-4 w-4 text-(--fg-subtle)" aria-hidden />
+                  <input
+                    type="text"
+                    placeholder="Search account, email, action…"
+                    aria-label="Search audit logs"
+                    value={logSearch}
+                    onChange={(e) => setLogSearch(e.target.value)}
+                    className="min-w-0 flex-1 bg-transparent text-ui outline-hidden placeholder:text-(--fg-subtle)"
+                  />
+                </label>
+                <DropdownMenu>
+                  <DropdownMenuTrigger className="flex h-9 items-center gap-2 rounded-xl border border-(--border) bg-(--card) px-3 text-xs font-semibold text-(--fg) hover:border-(--border-strong)">
+                    <Filter className="h-3.5 w-3.5 text-(--fg-subtle)" aria-hidden />
+                    {LOG_FILTERS.find((f) => f.key === logFilter)?.label}
+                    <ChevronDown className="h-3.5 w-3.5 text-(--fg-subtle)" aria-hidden />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent sideOffset={6} className="min-w-[240px]">
+                    <DropdownMenuRadioGroup value={logFilter} onValueChange={(v) => setLogFilter(v as typeof logFilter)}>
+                      {LOG_FILTERS.map((f) => (
+                        <DropdownMenuRadioItem key={f.key} value={f.key} className="py-2 text-xs">{f.label}</DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <button type="button" onClick={() => setLogSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))} className="btn btn-glass btn-sm ml-auto">
+                  <ArrowUpDown className="h-3.5 w-3.5" /> {logSortDir === 'desc' ? 'Newest' : 'Oldest'} first
+                </button>
+              </div>
+
+              <div className="adm-panel p-5">
+                {getGroupedLogs().length === 0 ? (
+                  <Empty>No logs match.</Empty>
+                ) : (
+                  getGroupedLogs().map(({ day, entries }) => (
+                    <div key={day} className="mb-7 last:mb-0">
+                      <p className="eyebrow mb-3.5 text-(--fg-subtle)">{day}</p>
+                      <ol className="ml-1.5 space-y-5 border-l-2 border-(--border) pl-5">
+                        {entries.map((log) => {
+                          const meta = ACTION_META[log.action] || DEFAULT_ACTION_META;
+                          const Icon = meta.icon;
+                          return (
+                            <li key={log.id} className="relative">
+                              <span className={cx('absolute left-[-26px] top-1 h-2.5 w-2.5 rounded-full ring-4 ring-(--card)', meta.dot)} />
+                              <div className="flex items-start gap-3">
+                                <span className={cx('grid h-9 w-9 shrink-0 place-items-center rounded-xl', meta.bg)}>
+                                  <Icon className={cx('h-4 w-4', meta.fg)} />
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <p className="text-sm font-semibold">{meta.label}</p>
+                                    <span className="whitespace-nowrap text-xs text-(--fg-subtle)" title={parseUtc(log.timestamp).toLocaleString()}>{timeAgo(log.timestamp)}</span>
+                                  </div>
+                                  {log.details && <p className="mt-1 wrap-break-word text-xs leading-relaxed text-(--fg-muted)">{log.details}</p>}
+                                  <p className="adm-table__mono mt-1.5 text-xs!">account id: {log.user_id}</p>
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ─────────────  SETTINGS  ───────────── */}
+          {activeTab === 'settings' && (
+            <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2">
+              <Panel
+                title="System status"
+                desc={health.checkedAt ? `Checked ${new Date(health.checkedAt).toLocaleTimeString()}` : 'Checking…'}
+                actions={refreshBtn(checkHealth)}
+              >
+                <div className="space-y-3">
+                  <div className="adm-setting-row">
+                    <span className="flex items-center gap-2.5">
+                      <span className={cx('h-2.5 w-2.5 rounded-full', pill.dot)} aria-hidden />
+                      <span>
+                        <span className="block text-sm font-semibold">API and database</span>
+                        <span className="block text-xs text-(--fg-muted)">{pill.label}{health.latencyMs != null ? ` · ${health.latencyMs} ms` : ''}</span>
+                      </span>
+                    </span>
+                  </div>
+                  <SettingSwitch
+                    label="Maintenance mode"
+                    desc="Disable access for non-admins."
+                    checked={systemSettings.maintenanceMode}
+                    onChange={(v) => setSystemSettings({ ...systemSettings, maintenanceMode: v })}
+                  />
+                  <SettingSwitch
+                    label="Allow registrations"
+                    desc="New users can sign up."
+                    checked={systemSettings.allowRegistrations}
+                    onChange={(v) => setSystemSettings({ ...systemSettings, allowRegistrations: v })}
+                  />
+                </div>
+              </Panel>
+
+              <Panel title="Appearance" desc="Applies to the admin console on this device.">
+                <div className="adm-segment adm-segment--full" role="group" aria-label="Theme">
+                  <button type="button" aria-pressed={!darkMode} onClick={() => setDark(false)}><Sun className="h-4 w-4" /> Light</button>
+                  <button type="button" aria-pressed={darkMode} onClick={() => setDark(true)}><Moon className="h-4 w-4" /> Dark</button>
+                </div>
+              </Panel>
+
+              <Panel className="md:col-span-2" title="Admin profile" desc="Change the administrator sign-in credentials.">
+                <div className="space-y-4">
+                  <div>
+                    <FieldLabel htmlFor="admin-email">Email</FieldLabel>
+                    <input id="admin-email" type="text" value={adminProfile.email} disabled className="input cursor-not-allowed opacity-60" />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <FieldLabel htmlFor="admin-pw">New password</FieldLabel>
+                      <input id="admin-pw" type="password" value={adminProfile.password} onChange={(e) => setAdminProfile({ ...adminProfile, password: e.target.value })} className="input" />
+                    </div>
+                    <div>
+                      <FieldLabel htmlFor="admin-pw-confirm">Confirm password</FieldLabel>
+                      <input
+                        id="admin-pw-confirm"
+                        type="password"
+                        value={adminProfile.confirm}
+                        onChange={(e) => setAdminProfile({ ...adminProfile, confirm: e.target.value })}
+                        className="input"
+                        aria-invalid={!!adminProfile.confirm && adminProfile.password !== adminProfile.confirm}
+                        aria-describedby="admin-pw-match"
+                      />
+                      {adminProfile.confirm && adminProfile.password !== adminProfile.confirm && (
+                        <p id="admin-pw-match" className="mt-1.5 text-xs" style={{ color: 'var(--danger)' }}>Passwords don’t match.</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <button type="button" onClick={handleAdminProfileUpdate} className="btn btn-primary" disabled={adminProfile.password !== adminProfile.confirm}>
+                      <Lock className="h-4 w-4" /> Update credentials
+                    </button>
+                  </div>
+                </div>
+              </Panel>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── User drawer: account, wallet, plan and delete for the user picked in the list ── */}
+      <Sheet open={!!drawerUser} onOpenChange={(o) => { if (!o) setDrawerUserId(null); }}>
+        <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-md">
+          {drawerUser && (() => {
+            const u = drawerUser;
+            const isSelf = u.id === user?.id;
+            const owner = (u.role ?? 'user') === 'user';
+            const dirty = (editForm.role != null && editForm.role !== u.role) || (editForm.businessName != null && editForm.businessName !== (u.businessName ?? ''));
+            return (
+              <>
+                <SheetHeader className="gap-3 border-b border-(--border) px-5 py-4 pr-12">
+                  <div className="flex items-center gap-3">
+                    <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-(--muted) text-sm font-semibold uppercase">{(u.businessName || u.email || '?').charAt(0)}</span>
+                    <div className="min-w-0">
+                      <SheetTitle className="truncate text-base font-semibold">{u.businessName || u.email}</SheetTitle>
+                      <SheetDescription className="truncate text-xs">{u.email}</SheetDescription>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5"><RoleBadge role={u.role} />{owner && <PlanBadge plan={u.subscription} />}{isSelf && <span className="badge badge-sage">You</span>}</div>
+                </SheetHeader>
+
+                <div className="min-h-0 flex-1 divide-y divide-(--border) overflow-y-auto">
+                  <section className="grid gap-4 px-5 py-5" aria-label="Account">
+                    <h3 className="text-xs font-semibold tracking-wide text-(--fg-subtle)">ACCOUNT</h3>
+                    <div>
+                      <FieldLabel htmlFor="ud-role">Role</FieldLabel>
+                      <KwSelect
+                        id="ud-role"
+                        value={editForm.role || u.role}
+                        disabled={isSelf}
+                        onValueChange={(v) => setEditForm({ ...editForm, role: v as any })}
+                        options={[{ value: 'user', label: 'Business owner' }, { value: 'support', label: 'Support' }, { value: 'admin', label: 'Admin' }]}
+                      />
+                      {isSelf && <p className="mt-1.5 text-xs text-(--fg-subtle)">You can’t change your own role.</p>}
+                    </div>
+                    <div>
+                      <FieldLabel htmlFor="ud-biz">Business name</FieldLabel>
+                      <input id="ud-biz" className="input" value={editForm.businessName ?? u.businessName ?? ''} onChange={(e) => setEditForm({ ...editForm, businessName: e.target.value })} />
+                    </div>
+                    <dl className="grid grid-cols-[96px_1fr] gap-x-3 gap-y-1.5 text-sm">
+                      <dt className="text-(--fg-muted)">Joined</dt><dd>{u.createdAt ? parseUtc(u.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'}</dd>
+                      <dt className="text-(--fg-muted)">User ID</dt><dd className="mono truncate text-xs leading-5">{u.id}</dd>
+                    </dl>
+                    <button type="button" className="btn btn-primary justify-self-start" disabled={!dirty} onClick={() => handleUserUpdate(u.id)}>
+                      <Save className="h-4 w-4" aria-hidden /> Save changes
+                    </button>
+                  </section>
+
+                  {owner && (
+                    <section className="grid gap-4 px-5 py-5" aria-label="Wallet">
+                      <h3 className="text-xs font-semibold tracking-wide text-(--fg-subtle)">WALLET</h3>
+                      <p className="mono text-2xl font-semibold">{peso(u.balance)}</p>
+                      <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
+                        <div>
+                          <FieldLabel htmlFor="ud-amt">Amount</FieldLabel>
+                          <input id="ud-amt" type="number" className="input" value={balanceForm.amount || ''} placeholder="e.g. 500 or -150" onChange={(e) => setBalanceForm({ ...balanceForm, amount: Number(e.target.value) })} />
+                        </div>
+                        <div>
+                          <FieldLabel htmlFor="ud-reason">Reason</FieldLabel>
+                          <input id="ud-reason" className="input" value={balanceForm.reason} placeholder="e.g. Manual top-up, GCash ref 1234" onChange={(e) => setBalanceForm({ ...balanceForm, reason: e.target.value })} />
+                        </div>
+                      </div>
+                      <button type="button" className="btn btn-outline justify-self-start" disabled={!balanceForm.amount || !balanceForm.reason.trim()} onClick={handleAdjustBalance}>
+                        <Wallet className="h-4 w-4" aria-hidden /> {balanceForm.amount < 0 ? `Remove ${peso(-balanceForm.amount)}` : balanceForm.amount > 0 ? `Add ${peso(balanceForm.amount)}` : 'Adjust balance'}
+                      </button>
+                    </section>
+                  )}
+
+                  {owner && (
+                    <section className="grid gap-4 px-5 py-5" aria-label="Plan">
+                      <h3 className="text-xs font-semibold tracking-wide text-(--fg-subtle)">PLAN</h3>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div className="min-w-44 flex-1">
+                          <FieldLabel htmlFor="ud-plan">Plan</FieldLabel>
+                          <KwSelect id="ud-plan" value={subForm.plan} onValueChange={(v) => setSubForm({ ...subForm, plan: v })} options={[{ value: 'FREE', label: 'Free' }, { value: 'PRO', label: 'Pro' }, { value: 'ENTERPRISE', label: 'Enterprise' }]} />
+                        </div>
+                        <button type="button" className="btn btn-outline" disabled={subForm.plan === (u.subscription || 'FREE')} onClick={handleUpdateSubscription}>Update plan</button>
+                      </div>
+                    </section>
+                  )}
+
+                  {!isSelf && (
+                    <section className="grid gap-3 px-5 py-5" aria-label="Delete account">
+                      <h3 className="text-xs font-semibold tracking-wide text-(--danger)">DELETE ACCOUNT</h3>
+                      {confirmDelete ? (
+                        <div className="grid gap-3 rounded-xl border border-[color-mix(in_srgb,var(--danger)_35%,transparent)] bg-[color-mix(in_srgb,var(--danger)_6%,var(--card))] p-3.5">
+                          <p className="text-sm">This permanently deletes <b>{u.email}</b> and all their posts, wallet and history. It can’t be undone.</p>
+                          <div className="flex gap-2">
+                            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirmDelete(false)}>Cancel</button>
+                            <button type="button" className="btn btn-sm text-white" style={{ background: 'var(--danger)' }} onClick={() => handleDeleteUser(u.id)}>
+                              <Trash2 className="h-4 w-4" aria-hidden /> Delete permanently
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button type="button" className="btn btn-outline btn-sm justify-self-start text-(--danger)" onClick={() => setConfirmDelete(true)}>
+                          <Trash2 className="h-4 w-4" aria-hidden /> Delete account
+                        </button>
+                      )}
+                    </section>
+                  )}
+                </div>
+              </>
+            );
+          })()}
+        </SheetContent>
+      </Sheet>
+
+      {/* ── Reject-verification dialog ── */}
+      {rejectModal && (
+        <AdminModal title="Send back for changes" sub={rejectModal.businessName} onClose={() => setRejectModal(null)}>
+          <div className="space-y-4">
+            <div>
+              <FieldLabel htmlFor="reject-reason">
+                Reason <span className="text-(--danger)">*</span>
+              </FieldLabel>
+              <textarea
+                id="reject-reason"
+                rows={3}
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="e.g. Document appears unreadable, business name does not match…"
+                className="input resize-none"
+                aria-describedby="reject-hint"
+              />
+              <p id="reject-hint" className="mt-1.5 text-xs" style={{ color: 'var(--fg-subtle)' }}>The owner sees this reason, so say what they need to fix.</p>
+            </div>
+            <div className="flex gap-2.5">
+              <button type="button" onClick={() => setRejectModal(null)} className="btn btn-outline flex-1">Cancel</button>
+              <button type="button" onClick={handleReject} disabled={!rejectReason.trim()} className="btn btn-primary flex-1 disabled:opacity-50" style={{ background: 'var(--danger)' }}>
+                Send back
+              </button>
+            </div>
+          </div>
+        </AdminModal>
+      )}
+    </SidebarProvider>
+  );
+};
+
+export default AdminDashboard;

@@ -1,0 +1,181 @@
+import React, { useState } from 'react';
+import { BrandProfile } from '../types';
+import { Store, Users, MessageCircle, PenTool, Check, Lock } from 'lucide-react';
+import { BRAND_VOICES } from '../constants/brandVoices';
+import Stepper, { Step } from './ui/Stepper';
+import './onboarding.css';
+import OnboardingBar from './onboarding/OnboardingBar';
+import IndustryPicker from './forms/IndustryPicker';
+
+interface Props {
+  onComplete: (profile: BrandProfile) => void;
+  /** The verified business name from the user record; not editable here. */
+  businessName?: string;
+  /** Saved Brand DNA to start from (e.g. reviewing it again while verification is pending). */
+  initialProfile?: BrandProfile | null;
+  /** The permit is still under review (the stepper shows Verification as in progress). */
+  verificationPending?: boolean;
+  /** Back to the verification screen without saving. */
+  onBack?: () => void;
+}
+
+const BrandSurvey: React.FC<Props> = ({ onComplete, businessName = '', initialProfile, verificationPending, onBack }) => {
+  const [profile, setProfile] = useState<BrandProfile>(initialProfile ? { ...initialProfile, businessName: businessName || initialProfile.businessName } : {
+    userId: '', // filled in by the caller on save
+    businessName,
+    industry: '',
+    targetAudience: '',
+    brandVoice: 'Friendly & Approachable',
+    keyThemes: ''
+  });
+
+  const handleChange = (field: keyof BrandProfile, value: string) => {
+    setProfile(prev => ({ ...prev, [field]: value }));
+  };
+
+  const sectionHead = (Icon: React.ElementType, title: string, sub: string) => (
+    <div className="bs-sec-head">
+      <div className="bs-sec-head__ico"><Icon /></div>
+      <div>
+        <h2>{title}</h2>
+        <p>{sub}</p>
+      </div>
+    </div>
+  );
+
+  const audienceSuggestions = ['Gen Z students', 'Working moms', 'Titas of Manila', 'Small business owners', 'OFW families'];
+  const themeSuggestions = ['Product launches', 'Behind the scenes', 'Customer testimonials', 'Promos & sales', 'Tips & how-tos', 'Memes'];
+
+  const appendTag = (field: 'targetAudience' | 'keyThemes', tag: string) => {
+    setProfile(prev => {
+      const current = (prev[field] || '').trim();
+      if (current.toLowerCase().includes(tag.toLowerCase())) return prev;
+      return { ...prev, [field]: current ? `${current}, ${tag}` : tag };
+    });
+  };
+
+
+
+  return (
+    <div className="ob-screen">
+      <div className="ob-orb ob-orb--1" />
+      <div className="ob-orb ob-orb--2" />
+
+      <div className="ob-inner bs-wrap">
+        <div>
+          <div className="mb-6 grid justify-items-start gap-2 [&_.ob-top]:mx-0 [&_.ob-top]:w-full">
+            {onBack && <button type="button" className="btn btn-ghost btn-sm -ml-2" onClick={onBack}>← Back to verification</button>}
+            <OnboardingBar current={2} help={!!verificationPending} verificationPending={verificationPending} />
+          </div>
+          <div className="bs-head">
+            <span className="bs-eyebrow">Brand DNA Setup</span>
+            <h1>Let&apos;s set up your brand</h1>
+            <p>This helps Kawayan AI create content that truly sounds like you.</p>
+          </div>
+
+          <div className="bs-card">
+            <Stepper
+              onComplete={() => onComplete(profile)}
+              /* Business name is read-only, so industry is the only step-1 input to gate on. */
+              canAdvance={(i) => i !== 0 || !!profile.industry.trim()}
+              nextLabel="Continue"
+              finishLabel="Finish setup"
+            >
+              <Step label="Business">
+                {sectionHead(Store, 'Business Basics', 'Tell us about your business')}
+                <div className="space-y-5">
+                  <div>
+                    <label className="bs-label" htmlFor="bs-bizname">Business Name</label>
+                    {/* Verified identity from sign-up — shown, not edited, so the
+                        brand profile can never drift from the approved name. */}
+                    <input
+                      id="bs-bizname"
+                      type="text"
+                      className="input"
+                      value={profile.businessName}
+                      readOnly
+                      aria-describedby="bs-bizname-hint"
+                    />
+                    <p id="bs-bizname-hint" className="bs-hint">
+                      <Lock className="w-3 h-3" /> From your verified business registration. Contact support to change it.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="bs-label" htmlFor="bs-industry">Industry / Niche</label>
+                    <IndustryPicker id="bs-industry" value={profile.industry} onChange={(v) => handleChange('industry', v)} autoFocus />
+                  </div>
+                </div>
+              </Step>
+
+              <Step label="Audience">
+                {sectionHead(Users, 'Target Audience', 'Who are your ideal customers?')}
+                <div>
+                  <label className="bs-label">Describe your audience</label>
+                  <textarea
+                    className="input h-40 resize-none"
+                    placeholder="e.g., Gen Z students in Manila, working moms looking for quick meals, titas of Manila..."
+                    value={profile.targetAudience}
+                    onChange={(e) => handleChange('targetAudience', e.target.value)}
+                    autoFocus
+                  />
+                  <div className="bs-chips">
+                    {audienceSuggestions.map((s) => (
+                      <button type="button" key={s} className="bs-chip" onClick={() => appendTag('targetAudience', s)}>
+                        + {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </Step>
+
+              <Step label="Voice">
+                {sectionHead(MessageCircle, 'Brand Voice', 'How should your brand sound?')}
+                <div className="bs-voice">
+                  {BRAND_VOICES.map((t) => {
+                    const active = profile.brandVoice === t.label;
+                    return (
+                      <button
+                        key={t.label}
+                        type="button"
+                        onClick={() => handleChange('brandVoice', t.label)}
+                        className={`bs-voice__opt${active ? ' is-active' : ''}`}
+                      >
+                        <div className="bs-voice__t">{t.label}</div>
+                        <div className="bs-voice__d">{t.desc}</div>
+                        {active && <span className="bs-voice__check"><Check /></span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Step>
+
+              <Step label="Themes">
+                {sectionHead(PenTool, 'Content Themes', 'Key topics you want to cover')}
+                <div>
+                  <label className="bs-label">Key content themes</label>
+                  <textarea
+                    className="input h-40 resize-none"
+                    placeholder="e.g., Product launches, behind the scenes, customer testimonials, funny memes..."
+                    value={profile.keyThemes}
+                    onChange={(e) => handleChange('keyThemes', e.target.value)}
+                    autoFocus
+                  />
+                  <div className="bs-chips">
+                    {themeSuggestions.map((s) => (
+                      <button type="button" key={s} className="bs-chip" onClick={() => appendTag('keyThemes', s)}>
+                        + {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </Step>
+            </Stepper>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+};
+
+export default BrandSurvey;

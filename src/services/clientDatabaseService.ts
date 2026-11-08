@@ -1,0 +1,536 @@
+import { User, BrandProfile, GeneratedPost } from '../types';
+import { logger } from '../utils/logger';
+import { clearAuthSession, isAuthResponse, fetchWithRetry, normalizeEmail, sanitizeUserForSession } from '../utils/authSession';
+
+export class ClientDatabaseService {
+  private baseUrl = '/api';
+
+  private getHeaders(): HeadersInit {
+    const token = localStorage.getItem('kawayan_jwt');
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    };
+  }
+
+  // --- Users (Auth) ---
+  async createUser(
+    email: string,
+    password: string,
+    role: 'user' | 'admin' = 'user',
+    businessName?: string,
+    options?: { acceptedTerms?: boolean; termsVersion?: string }
+  ): Promise<User | null> {
+    try {
+      const response = await fetch(`${this.baseUrl}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: normalizeEmail(email),
+          password,
+          role,
+          businessName,
+          acceptedTerms: options?.acceptedTerms,
+          termsVersion: options?.termsVersion,
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || errorData.message || 'Registration failed');
+      }
+
+      const data = await response.json();
+      const user = sanitizeUserForSession(data.user) as User;
+      const token = data.token;
+
+      if (!user?.id || !token) {
+        throw new Error('Registration succeeded but session data was incomplete.');
+      }
+      
+      localStorage.setItem('kawayan_jwt', token);
+      localStorage.setItem('kawayan_session', JSON.stringify(user));
+      
+      return user;
+    } catch (error) {
+      logger.error('Error creating user (api)', { email, error });
+      throw error;
+    }
+  }
+
+  async loginUser(email: string, password: string): Promise<{ user: User; token: string } | null> {
+    try {
+      const response = await fetchWithRetry(`${this.baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: normalizeEmail(email), password })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || errorData.message || 'Login failed');
+      }
+
+      const data = await response.json();
+      const user = sanitizeUserForSession(data.user) as User;
+      const token = data.token;
+
+      if (!user?.id || !token) {
+        throw new Error('Login succeeded but session data was incomplete. Please try again.');
+      }
+      
+      localStorage.setItem('kawayan_jwt', token);
+      localStorage.setItem('kawayan_session', JSON.stringify(user));
+      
+      return { user, token };
+    } catch (error) {
+      logger.error('Error logging in user (api)', { email, error });
+      throw error;
+    }
+  }
+
+  async logoutUser(): Promise<void> {
+    try {
+      await fetch(`${this.baseUrl}/auth/logout`, {
+        method: 'POST',
+        headers: this.getHeaders()
+      });
+    } catch (error) {
+      logger.error('Error logging out (api)', { error });
+    } finally {
+      localStorage.removeItem('kawayan_session');
+      localStorage.removeItem('kawayan_jwt');
+    }
+  }
+
+  /** Deletes the signed-in owner's account. `confirmEmail` must match the account's email. */
+  async deleteOwnAccount(confirmEmail: string): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/auth/me`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ confirmEmail }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || 'Could not delete your account');
+    }
+  }
+
+  async updateUserTheme(userId: string, theme: 'light' | 'dark'): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/auth/theme`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ userId, theme })
+      });
+
+      if (!response.ok) throw new Error('Failed to update theme');
+      
+      // Update local session
+      const session = this.getCurrentUser();
+      if (session && session.id === userId) {
+        session.theme = theme;
+        localStorage.setItem('kawayan_session', JSON.stringify(session));
+      }
+    } catch (error) {
+      logger.error('Error updating theme (api)', { userId, theme, error });
+      throw error;
+    }
+  }
+
+  async updateUserPassword(userId: string, newPassword: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/auth/password`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ userId, newPassword })
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to update password');
+      }
+    } catch (error) {
+      logger.error('Error updating password (api)', { userId, error });
+      throw error;
+    }
+  }
+
+  // Helper for synchronous access, kept for compatibility
+  getCurrentUser(): User | null {
+    try {
+      const session = localStorage.getItem('kawayan_session');
+      return session ? JSON.parse(session) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async getCurrentUserAsync(): Promise<User | null> {
+    const token = localStorage.getItem('kawayan_jwt');
+    if (!token) return null;
+
+    try {
+      const response = await fetchWithRetry(`${this.baseUrl}/auth/me`, {
+        headers: this.getHeaders(),
+      });
+
+      if (isAuthResponse(response.status)) {
+        clearAuthSession();
+        return null;
+      }
+
+      if (!response.ok) {
+        return this.getCurrentUser();
+      }
+
+      const user = await response.json();
+      localStorage.setItem('kawayan_session', JSON.stringify(user));
+      return user;
+    } catch {
+      // Network / server starting — keep cached session
+      return this.getCurrentUser();
+    }
+  }
+
+  // --- Profiles ---
+  async saveProfile(profile: BrandProfile): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/profiles`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(profile)
+      });
+
+      if (!response.ok) throw new Error('Failed to save profile');
+    } catch (error) {
+      logger.error('Error saving profile (api)', { userId: profile.userId, error });
+      throw error;
+    }
+  }
+
+  /**
+   * The brand profile, or undefined only when the server says this account has none (404).
+   * Any other failure throws: "couldn't reach the server" must never look like "new account",
+   * or a backend restart sends existing users to brand setup.
+   */
+  async getProfile(userId: string): Promise<BrandProfile | undefined> {
+    let response: Response | null = null;
+    // While the backend restarts, the dev proxy answers 5xx for a few seconds; wait it out.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      response = await fetchWithRetry(`${this.baseUrl}/profiles/${userId}`, { headers: this.getHeaders() }).catch(() => null);
+      if (response && response.status < 500) break;
+      if (attempt < 4) await new Promise((r) => setTimeout(r, 800));
+    }
+    if (response?.status === 404) return undefined;
+    if (!response?.ok) {
+      logger.error('Error getting profile (api)', { userId, status: response?.status });
+      throw new Error('Could not load the brand profile');
+    }
+    return await response.json();
+  }
+
+  // --- Posts ---
+  async savePost(post: GeneratedPost): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/posts`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(post)
+      });
+
+      if (response.status === 403) {
+        const body = await response.json().catch(() => ({}));
+        if (body.error === 'TIER_LIMIT_REACHED') {
+          throw new Error('TIER_LIMIT_REACHED');
+        }
+      }
+
+      // One post per day: the server says which post already has the day.
+      if (response.status === 409) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || 'That day already has a post.');
+      }
+
+      if (!response.ok) throw new Error('Failed to save post');
+    } catch (error) {
+      logger.error('Error saving post (api)', { postId: post.id, error });
+      throw error;
+    }
+  }
+
+  /** `month` ("YYYY-MM") limits the result to that month; leave it out for every post. */
+  async getUserPosts(userId: string, month?: string): Promise<GeneratedPost[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/posts/user/${userId}${month ? `?month=${month}` : ''}`, {
+        headers: this.getHeaders()
+      });
+
+      if (!response.ok) throw new Error('Failed to fetch posts');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting user posts (api)', { userId, error });
+      return [];
+    }
+  }
+
+  async savePlan(userId: string, month: string, ideas: any[]): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/plans`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ userId, month, ideas })
+      });
+
+      if (!response.ok) throw new Error('Failed to save plan');
+    } catch (error) {
+      logger.error('Error saving plan (api)', { userId, month, error });
+      throw error;
+    }
+  }
+
+  async getPlan(userId: string, month: string): Promise<any[] | null> {
+    try {
+      const response = await fetch(`${this.baseUrl}/plans/${userId}/${month}`, {
+        headers: this.getHeaders()
+      });
+
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting plan (api)', { userId, month, error });
+      return null;
+    }
+  }
+
+  // --- Admin Methods ---
+  async getAdminStats(start?: string, end?: string): Promise<{
+    totalUsers: number;
+    activeUsers: number;
+    totalPostsGenerated: number;
+    revenue: number;
+    cancelledTransactions: number;
+    pendingTransactions: number;
+    revenueData: { name: string; value: number }[];
+    churnData: { name: string; value: number }[];
+    retentionRate: number;
+  }> {
+    try {
+      const query = start && end ? `?start=${start}&end=${end}` : '';
+      const response = await fetch(`${this.baseUrl}/admin/stats${query}`, {
+        headers: this.getHeaders()
+      });
+
+      if (!response.ok) throw new Error('Failed to fetch stats');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting admin stats (api)', { error });
+      return {
+        totalUsers: 0,
+        activeUsers: 0,
+        totalPostsGenerated: 0,
+        revenue: 0,
+        cancelledTransactions: 0,
+        pendingTransactions: 0,
+        revenueData: [],
+        churnData: [],
+        retentionRate: 0,
+      };
+    }
+  }
+
+  async getPendingTransactionsAdmin(): Promise<any[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/pending-transactions`, {
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to fetch pending transactions');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting pending transactions (api)', { error });
+      return [];
+    }
+  }
+
+  async approveTransactionAdmin(transactionId: string): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/admin/wallet/approve`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ transactionId })
+    });
+    if (!response.ok) throw new Error('Failed to approve transaction');
+  }
+
+  async getAuditLogs(limit: number = 100): Promise<any[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/logs?limit=${limit}`, {
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to fetch logs');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting audit logs (api)', { error });
+      return [];
+    }
+  }
+
+  async getAllUsers(): Promise<User[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/users`, {
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to fetch users');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting all users (api)', { error });
+      return [];
+    }
+  }
+
+  async getAllTicketsAdmin(): Promise<any[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/tickets`, {
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to fetch tickets');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting all tickets (api)', { error });
+      return [];
+    }
+  }
+
+  async updateUser(userId: string, data: any): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/users/${userId}`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify(data)
+      });
+      if (!response.ok) throw new Error('Failed to update user');
+    } catch (error) {
+      logger.error('Error updating user (api)', { userId, error });
+      throw error;
+    }
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/users/${userId}`, {
+        method: 'DELETE',
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to delete user');
+    } catch (error) {
+      logger.error('Error deleting user (api)', { userId, error });
+      throw error;
+    }
+  }
+
+  async adminAdjustBalance(userId: string, amount: number, reason: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/balance`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ userId, amount, reason })
+      });
+      if (!response.ok) throw new Error('Failed to adjust balance');
+    } catch (error) {
+      logger.error('Error adjusting balance (api)', { userId, error });
+      throw error;
+    }
+  }
+
+  async adminUpdateSubscription(userId: string, plan: string, expiresAt: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/subscription`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ userId, plan, expiresAt })
+      });
+      if (!response.ok) throw new Error('Failed to update subscription');
+    } catch (error) {
+      logger.error('Error updating subscription (api)', { userId, error });
+      throw error;
+    }
+  }
+
+  // --- Business Verification ---
+  async getVerificationStatus(userId: string): Promise<{ status: string; rejectionReason?: string }> {
+    try {
+      const response = await fetchWithRetry(`${this.baseUrl}/verification/status/${userId}`, {
+        headers: this.getHeaders(),
+      });
+
+      if (isAuthResponse(response.status)) {
+        return { status: 'auth_required' };
+      }
+
+      if (!response.ok) {
+        logger.error('Error getting verification status (api)', { userId, status: response.status });
+        return { status: 'unavailable' };
+      }
+
+      const data = await response.json();
+      return data?.status ? data : { status: 'none' };
+    } catch (error) {
+      logger.error('Error getting verification status (api)', { userId, error });
+      return { status: 'unavailable' };
+    }
+  }
+
+  async getAllVerifications(): Promise<any[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/verifications`, {
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to fetch verifications');
+      return await response.json();
+    } catch (error) {
+      logger.error('Error getting verifications (api)', { error });
+      return [];
+    }
+  }
+
+  async approveVerification(id: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/verifications/${id}/approve`, {
+        method: 'POST',
+        headers: this.getHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to approve verification');
+    } catch (error) {
+      logger.error('Error approving verification (api)', { id, error });
+      throw error;
+    }
+  }
+
+  async rejectVerification(id: string, reason: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/admin/verifications/${id}/reject`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ reason })
+      });
+      if (!response.ok) throw new Error('Failed to reject verification');
+    } catch (error) {
+      logger.error('Error rejecting verification (api)', { id, error });
+      throw error;
+    }
+  }
+
+  // --- Health Check ---
+  async healthCheck(): Promise<{ status: string; timestamp: string }> {
+    try {
+      const response = await fetch(`${this.baseUrl}/health`);
+      return await response.json();
+    } catch (error) {
+      return { status: 'unhealthy', timestamp: new Date().toISOString() };
+    }
+  }
+
+  // --- Client Detection ---
+  static isClientEnvironment(): boolean {
+    return typeof window !== 'undefined';
+  }
+}

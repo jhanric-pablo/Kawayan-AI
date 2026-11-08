@@ -1,0 +1,189 @@
+export type VerificationStatus = 'pending' | 'verified' | 'rejected' | 'none';
+
+export interface BusinessVerification {
+  id: string;
+  userId: string;
+  businessAddress: string;
+  businessPhone: string;
+  documentName: string;
+  documentPath: string; // server-side file path
+  status: VerificationStatus;
+  rejectionReason?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt: string;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  passwordHash?: string; // In a real app, never store plain text. We'll mock this.
+  role: 'user' | 'admin' | 'support';
+  businessName?: string;
+  theme?: 'light' | 'dark';
+  balance?: number;
+  createdAt?: string;
+  verificationStatus?: VerificationStatus;
+}
+
+export interface BrandProfile {
+  id?: string;
+  userId: string;
+  businessName: string;
+  industry: string;
+  targetAudience: string;
+  brandVoice: string; 
+  keyThemes: string;
+  brandColors?: string[]; // Array of HEX codes
+  contactEmail?: string;
+  contactPhone?: string;
+  /** City or area (needs the 2026-11-02 migration; absent until the column exists). */
+  city?: string | null;
+  /** Caption language (same migration). */
+  language?: 'Taglish' | 'English' | 'Filipino' | null;
+}
+
+export interface ContentIdea {
+  day: number;
+  title: string;
+  topic: string;
+  format: 'Image' | 'Text' | 'Video';
+}
+
+export interface PostVersion {
+  caption: string;
+  imagePrompt: string;
+  viralityScore?: number;
+  viralityReason?: string;
+  createdAt: string;
+}
+
+export interface GeneratedPost {
+  id: string;
+  userId: string;
+  date: string; // YYYY-MM-DD
+  topic: string;
+  caption: string;
+  imagePrompt: string;
+  imageUrl?: string;
+  status: 'Draft' | 'Scheduled' | 'Published';
+  viralityScore?: number;
+  viralityReason?: string;
+  format?: string;
+  // New fields for governance
+  regenCount: number;
+  history: PostVersion[]; // Store previous versions
+  externalLink?: string;
+  publishedAt?: string;
+}
+
+export interface Ticket {
+  id: string;
+  ticketNum: number;
+  userId: string;
+  userEmail: string;
+  subject: string;
+  category: 'Technical' | 'Billing' | 'General';
+  priority: 'Low' | 'Medium' | 'High' | 'Critical';
+  status: 'Open' | 'Pending' | 'Resolved';
+  createdAt: string;
+  updatedAt?: string;
+  /** Messages from before chat moved to Stream; new ones live in the ticket's Stream channel. */
+  messages: {sender: 'user'|'agent', text: string, timestamp: string}[];
+  assigneeId?: string | null;
+  assigneeName?: string | null;
+  labels?: string[];
+  snoozedUntil?: string | null;
+  firstResponseAt?: string | null;
+  resolvedAt?: string | null;
+  rating?: number | null;
+  /** Staff lists only: the owner's business name. */
+  ownerName?: string | null;
+}
+
+/** A staff-only note on a ticket, or a line of its history ("assigned to Marco"). */
+export interface TicketNote {
+  id: string;
+  ticketId: string;
+  authorId: string | null;
+  authorName: string;
+  kind: 'note' | 'activity';
+  body: string;
+  createdAt: string;
+}
+
+export interface CannedReply {
+  id: string;
+  shortcut: string;
+  title: string;
+  body: string;
+}
+
+export enum ViewState {
+  LANDING = 'LANDING',
+  LOGIN = 'LOGIN',
+  SIGNUP = 'SIGNUP',
+  ADMIN_LOGIN = 'ADMIN_LOGIN',
+  RESET_PASSWORD = 'RESET_PASSWORD',
+  VERIFICATION = 'VERIFICATION',
+  SURVEY = 'SURVEY',
+  CALENDAR = 'CALENDAR',
+  SETTINGS = 'SETTINGS',
+  INSIGHTS = 'INSIGHTS',
+  SOCIAL = 'SOCIAL',
+  BILLING = 'BILLING',
+  SUPPORT_DASHBOARD = 'SUPPORT_DASHBOARD',
+  ADMIN_DASHBOARD = 'ADMIN_DASHBOARD',
+  PLANNER = 'PLANNER',
+  STUDIO = 'STUDIO',
+  HELP = 'HELP',
+}
+
+export interface ChartData {
+  name: string;
+  value: number;
+}
+
+// Validation schemas using Zod
+export const UserSchema = {
+  email: (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),
+  password: (password: string) => password.length >= 6,
+  role: (role: string) => ['user', 'admin'].includes(role)
+};
+
+export const BrandProfileSchema = {
+  businessName: (name: string) => name.trim().length >= 2,
+  industry: (industry: string) => industry.trim().length >= 2,
+  targetAudience: (audience: string) => audience.trim().length >= 2,
+  brandVoice: (voice: string) => voice.trim().length >= 2,
+  keyThemes: (themes: string) => themes.trim().length >= 2
+};
+
+export const GeneratedPostSchema = {
+  topic: (topic: string) => topic.trim().length >= 2,
+  caption: (caption: string) => caption.trim().length >= 10,
+  imagePrompt: (prompt: string) => prompt.trim().length >= 5,
+  status: (status: string) => ['Draft', 'Scheduled', 'Published'].includes(status),
+  viralityScore: (score: number) => score >= 0 && score <= 100
+};
+
+export const AIResponseSchema = {
+  contentIdea: (idea: any): idea is ContentIdea => {
+    return typeof idea.day === 'number' &&
+           typeof idea.title === 'string' &&
+           typeof idea.topic === 'string' &&
+           ['Image', 'Text', 'Video'].includes(idea.format);
+  },
+  postResponse: (response: any): response is {
+    caption: string;
+    imagePrompt: string;
+    viralityScore: number;
+    viralityReason: string;
+  } => {
+    return typeof response.caption === 'string' &&
+           typeof response.imagePrompt === 'string' &&
+           typeof response.viralityScore === 'number' &&
+           response.viralityScore >= 0 && response.viralityScore <= 100 &&
+           typeof response.viralityReason === 'string';
+  }
+};

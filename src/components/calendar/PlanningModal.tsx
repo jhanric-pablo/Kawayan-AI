@@ -1,0 +1,566 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { ProgressBar } from '../ui/progress-bar';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import { Popover, PopoverClose, PopoverContent, PopoverTitle, PopoverTrigger } from '../ui/popover';
+import { ContentIdea, GeneratedPost } from '../../types';
+import type { SocialAccount } from '../../services/socialService';
+import {
+  X, RefreshCcw, Loader2, ArrowUpRight, Check, CircleAlert, Ellipsis, PencilLine, CalendarArrowUp, Trash2, Image as ImageIcon,
+} from 'lucide-react';
+import { KawayanMark } from '../KawayanLogo';
+import TextareaAutosize from 'react-textarea-autosize';
+import PostCountPicker from './PostCountPicker';
+import clsx from 'clsx';
+import ChannelTimelineTrack from './ChannelTimelineTrack';
+import type { TimelineCardItem } from './mapCalendarEvents';
+import type { PostChannels } from '../../utils/workspaceFeed';
+import { PRIMARY_BTN } from './PostComposer';
+import { useFocusTrap } from '../../utils/useFocusTrap';
+import KwSelect from '../ui/kw-select';
+
+/**
+ * PlanningModal: the month planner.
+ *
+ * Left: the month's focus, starting points and where you are in the flow (focus, ideas, posts).
+ * Right: the month on the channel timeline. The AI's ideas ride the top lane as dashed capsules
+ * (edit, reschedule, delete); what's already scheduled or posted sits in each channel's lane.
+ * Bottom: one action bar (plan, re-plan, create). Every action is a ContentCalendar handler.
+ */
+interface Props {
+  open: boolean;
+  /** The post studio is open on top of the planner; Escape belongs to it. */
+  paused: boolean;
+  onClose: () => void;
+  monthLabel: string;
+  planLabel: string;
+  batchPostCount: number;
+  monthlyPostCount: number;
+  trialLimitReached: boolean;
+  scheduleRange: { minDay: number; maxDay: number };
+  batchStrategy: string;
+  onStrategyChange: (v: string) => void;
+  loadingPlan: boolean;
+  batchProgress: { current: number; total: number } | null;
+  creatingDay: number | null;
+  ideas: ContentIdea[];
+  postStatusByDay: Record<number, GeneratedPost['status']>;
+  /** Ideas that would get a post if "Create" were pressed now (no post yet, within the plan's allowance). */
+  createCount: number;
+  /** For the timeline's channel lanes. */
+  posts: GeneratedPost[];
+  accounts: SocialAccount[] | null;
+  channels: PostChannels;
+  failedIds: string[];
+  onGeneratePlan: () => void;
+  onBatchGenerate: () => void;
+  onUpdateIdea: (index: number, field: keyof ContentIdea, value: string | number) => void;
+  onDeleteIdea: (index: number) => void;
+  onOpenDay: (day: number) => void;
+  onOpenBilling: () => void;
+  /** How many ideas "Plan" makes, picked by the owner, at most `maxPlanCount`. */
+  planCount: number;
+  /** Posts left this month, capped by open days left (no post yet, today onward). */
+  maxPlanCount: number;
+  openDayCount: number;
+  onPlanCountChange: (n: number) => void;
+  /** Switch the planner to next month (offered near the end of the month). */
+  onPlanNextMonth: () => void;
+}
+
+
+const STRATEGY_PRESETS = [
+  'Seasonal & local specials',
+  'New product launch',
+  'Promo / limited-time sale',
+  'Behind the scenes week',
+  'Customer spotlights',
+  'Educational tips & how-tos',
+];
+
+const LABEL = 'eyebrow text-(--fg-subtle)';
+const INPUT =
+  'w-full rounded-lg border border-(--border) bg-(--bg-alt) px-3 py-2 text-ui text-(--fg) outline-hidden transition-colors focus:border-(--green) focus:ring-2 focus:ring-(--ring) read-only:opacity-70';
+
+interface CapsuleProps {
+  idea: ContentIdea;
+  mon: string;
+  chip: { label: string; busy?: boolean } | null;
+  locked: boolean;
+  dayOptions: { day: number; label: string }[];
+  onUpdate: (field: keyof ContentIdea, value: string | number) => void;
+  onDelete: () => void;
+  onWrite: () => void;
+}
+
+/** One AI idea on the timeline: a dashed capsule with a hover menu and an editor popover. */
+const IdeaCapsule: React.FC<CapsuleProps> = ({ idea, mon, chip, locked, dayOptions, onUpdate, onDelete, onWrite }) => {
+  const [mode, setMode] = useState<'edit' | 'move' | null>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const dayRef = useRef<HTMLButtonElement>(null);
+  // Opened from the menu: wait for the menu to hand focus back before the editor takes it.
+  const openAs = (m: 'edit' | 'move') => requestAnimationFrame(() => setMode(m));
+
+  return (
+    <div className="group relative z-10">
+      <Popover open={!!mode} onOpenChange={(o) => setMode(o ? 'edit' : null)}>
+        <PopoverTrigger
+          disabled={locked}
+          aria-label={`Idea for ${mon} ${idea.day}: ${idea.title || 'untitled'}. Edit`}
+          className={clsx(
+            'block w-full rounded-xl border border-dashed p-2 pr-7 text-left outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-(--ring)',
+            chip?.busy
+              ? 'border-(--green) bg-(--green-soft) ring-2 ring-(--green)'
+              : 'border-(--green) bg-(--green-soft) hover:border-(--green) hover:bg-(--green-soft) data-popup-open:border-(--green) data-popup-open:bg-(--green-soft)',
+            locked && !chip?.busy && 'opacity-70',
+          )}
+        >
+          <span className="line-clamp-2 text-xs font-semibold leading-tight text-(--fg)">{idea.title || 'Untitled idea'}</span>
+          <span className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-(--primary)">
+            {chip?.busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ImageIcon className="h-3 w-3" aria-hidden />}
+            {chip ? chip.label : 'Idea'}
+          </span>
+        </PopoverTrigger>
+        <PopoverContent
+          align="start"
+          sideOffset={6}
+          initialFocus={mode === 'move' ? dayRef : titleRef}
+          className="w-[min(92vw,320px)] gap-3 rounded-2xl p-4"
+        >
+          <PopoverTitle className="font-sans text-sm font-semibold">{mode === 'move' ? 'Reschedule idea' : 'Edit idea'}</PopoverTitle>
+          {mode !== 'move' && (
+            <>
+              <label className="block space-y-1">
+                <span className={LABEL}>Heading</span>
+                <input ref={titleRef} value={idea.title} onChange={(e) => onUpdate('title', e.target.value)} placeholder="Idea heading" className={INPUT} />
+              </label>
+              <label className="block space-y-1">
+                <span className={LABEL}>What it’s about</span>
+                <textarea value={idea.topic} rows={3} onChange={(e) => onUpdate('topic', e.target.value)} placeholder="What the post is about" className={clsx(INPUT, 'resize-y')} />
+              </label>
+            </>
+          )}
+          <label className="block space-y-1">
+            <span className={LABEL}>Day</span>
+            <KwSelect triggerRef={dayRef} aria-label="Day" value={String(idea.day)} onValueChange={(v) => onUpdate('day', Number(v))} options={dayOptions.map((o) => ({ value: String(o.day), label: o.label }))} />
+          </label>
+          <div className="flex items-center justify-between pt-1">
+            <button type="button" onClick={() => { setMode(null); onWrite(); }} className="inline-flex items-center gap-1 text-ui font-medium text-(--fg) underline underline-offset-2 hover:text-(--green-ink)">
+              Write now <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
+            <PopoverClose className={clsx(PRIMARY_BTN, 'px-4 py-1.5 text-ui')}>Done</PopoverClose>
+          </div>
+        </PopoverContent>
+      </Popover>
+
+      {!locked && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            aria-label={`Actions for ${idea.title || 'idea'}`}
+            className="absolute right-0.5 top-0.5 grid h-6 w-6 place-items-center rounded-md text-(--fg-muted) transition-opacity hover:bg-(--bg-alt) hover:text-(--fg) pointer-fine:opacity-0 pointer-fine:group-hover:opacity-100 pointer-fine:focus-visible:opacity-100 pointer-fine:data-popup-open:opacity-100"
+          >
+            <Ellipsis className="h-3.5 w-3.5" strokeWidth={2} />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[164px]">
+            <DropdownMenuItem onClick={() => openAs('edit')}>
+              <PencilLine className="text-(--fg-muted)" aria-hidden /> Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openAs('move')}>
+              <CalendarArrowUp className="text-(--fg-muted)" aria-hidden /> Reschedule
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onWrite}>
+              <ArrowUpRight className="text-(--fg-muted)" aria-hidden /> Write now
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              <Trash2 aria-hidden /> Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
+  );
+};
+
+const PlanningModal: React.FC<Props> = ({
+  open,
+  paused,
+  onClose,
+  monthLabel,
+  planLabel,
+  batchPostCount,
+  monthlyPostCount,
+  trialLimitReached,
+  scheduleRange,
+  batchStrategy,
+  onStrategyChange,
+  loadingPlan,
+  batchProgress,
+  creatingDay,
+  ideas,
+  postStatusByDay,
+  createCount,
+  posts,
+  accounts,
+  channels,
+  failedIds,
+  onGeneratePlan,
+  onBatchGenerate,
+  onUpdateIdea,
+  onDeleteIdea,
+  onOpenDay,
+  onOpenBilling,
+  planCount,
+  maxPlanCount,
+  openDayCount,
+  onPlanCountChange,
+  onPlanNextMonth,
+}) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const latest = useRef({ paused, onClose });
+  useEffect(() => {
+    latest.current = { paused, onClose };
+  });
+
+  useFocusTrap(dialogRef, open && !paused);
+
+  // Escape closes the planner, unless it's meant for something on top (the studio, a popover, a confirm).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as Node;
+      const forUs = target === document.body || !!dialogRef.current?.contains(target);
+      if (e.key === 'Escape' && forUs && !latest.current.paused) latest.current.onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialogRef.current?.focus();
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  // "October 2026" → real dates for weekdays and ranges.
+  const parsed = new Date(`${monthLabel} 1`);
+  const year = Number.isNaN(parsed.getTime()) ? new Date().getFullYear() : parsed.getFullYear();
+  const month = Number.isNaN(parsed.getTime()) ? new Date().getMonth() : parsed.getMonth();
+  const monthName = new Date(year, month, 1).toLocaleDateString('en-PH', { month: 'long' });
+  const mon = new Date(year, month, 1).toLocaleDateString('en-PH', { month: 'short' });
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const rangeText = `${mon} ${scheduleRange.minDay} – ${mon} ${scheduleRange.maxDay}`;
+
+  const planning = loadingPlan && !batchProgress;
+  const creating = !!batchProgress;
+  const busy = loadingPlan;
+  const withPosts = ideas.filter((i) => postStatusByDay[i.day]).length;
+  const remaining = Math.max(0, batchPostCount - monthlyPostCount);
+  const usagePct = batchPostCount > 0 ? Math.min(100, (monthlyPostCount / batchPostCount) * 100) : 0;
+  const focus = batchStrategy.trim();
+
+  // Open days: in range, no post yet. They frame the plan and pulse while the AI fills them.
+  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+  const openDays = days.filter((d) => d >= scheduleRange.minDay && d <= scheduleRange.maxDay && !postStatusByDay[d]);
+  const ideaDays = new Set(ideas.map((i) => i.day));
+
+  const dayOptionsFor = (current: number) =>
+    days
+      .filter((d) => d === current || (d >= scheduleRange.minDay && d <= scheduleRange.maxDay))
+      .map((d) => ({
+        day: d,
+        label: `${new Date(year, month, d).toLocaleDateString('en-PH', { weekday: 'short' })}, ${mon} ${d}${
+          postStatusByDay[d] ? ' · has a post' : d !== current && ideaDays.has(d) ? ' · has an idea' : ''
+        }`,
+      }));
+
+  const flow = [
+    {
+      title: 'Set a focus',
+      sub: focus ? `“${focus.length > 42 ? `${focus.slice(0, 42)}…` : focus}”` : 'Optional, but it sharpens every idea',
+      state: focus || ideas.length ? 'done' : 'active',
+    },
+    {
+      title: planCount ? `Plan ${planCount} idea${planCount === 1 ? '' : 's'}` : 'Plan ideas',
+      sub: ideas.length ? `${ideas.length} idea${ideas.length === 1 ? '' : 's'}, ${rangeText}` : `Dated ${rangeText}`,
+      state: planning ? 'busy' : ideas.length ? 'done' : focus ? 'active' : 'todo',
+    },
+    {
+      title: 'Create the posts',
+      sub: creating
+        ? `${batchProgress!.current} of ${batchProgress!.total} done`
+        : ideas.length
+          ? `${withPosts} of ${ideas.length} idea${ideas.length === 1 ? ' has' : 's have'} a post`
+          : 'Captions, scores and visuals for every idea',
+      state: creating ? 'busy' : ideas.length && withPosts >= ideas.length ? 'done' : ideas.length ? 'active' : 'todo',
+    },
+  ];
+
+  const renderIdea = (item: TimelineCardItem) => {
+    const index = item.ideaIndex!;
+    const idea = ideas[index];
+    if (!idea) return null;
+    const isCreating = creatingDay === idea.day;
+    const passed = idea.day < scheduleRange.minDay; // batch create skips these
+    const queued = creating && !isCreating && !passed;
+    const chip = isCreating ? { label: 'Creating…', busy: true } : passed ? { label: 'Day passed' } : queued ? { label: 'Queued' } : null;
+    return (
+      <IdeaCapsule
+        idea={idea}
+        mon={mon}
+        chip={chip}
+        locked={creating || planning}
+        dayOptions={dayOptionsFor(idea.day)}
+        onUpdate={(field, value) => onUpdateIdea(index, field, value)}
+        onDelete={() => onDeleteIdea(index)}
+        onWrite={() => onOpenDay(idea.day)}
+      />
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-90 flex items-center justify-center sm:p-6" role="presentation">
+      <div className="absolute inset-0 bg-black/45 animate-fade-in motion-reduce:animate-none" onClick={onClose} aria-hidden="true" />
+
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="planning-title"
+        tabIndex={-1}
+        className="relative flex h-full w-full max-w-[1280px] flex-col overflow-hidden bg-(--bg) text-(--fg) outline-hidden animate-scale-in motion-reduce:animate-none sm:h-[min(92vh,880px)] sm:rounded-xl sm:border sm:border-(--border) sm:shadow-lg"
+      >
+        {/* ── Header ── */}
+        <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-(--border) bg-(--card) px-5 py-4 sm:px-6">
+          <h2 id="planning-title" className="text-xl font-semibold tracking-tight">Plan your month</h2>
+          <span className="badge badge-sage mono">{monthLabel}</span>
+          <span className="text-xs text-(--fg-muted)">{planLabel} plan</span>
+          <div className="ml-auto flex items-center gap-2.5 text-xs text-(--fg-muted)">
+            <span className="h-1.5 w-24 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--fg)_9%,transparent)]" aria-hidden>
+              <b className="block h-full rounded-full bg-(--green)" style={{ width: `${usagePct}%` }} />
+            </span>
+            <span className="tabular-nums">{monthlyPostCount} of {batchPostCount} posts used</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close planner"
+            className="grid h-9 w-9 place-items-center rounded-full text-(--fg-muted) transition-colors hover:bg-(--bg-alt) hover:text-(--fg)"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto lg:grid lg:grid-cols-[35fr_65fr] lg:overflow-hidden">
+          {/* ── Campaign strategy ── */}
+          <aside className="space-y-6 border-b border-(--border) px-5 py-5 sm:px-6 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+            {trialLimitReached && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-transparent bg-(--amber-soft) px-3.5 py-2.5 text-ui text-(--amber)" role="status">
+                <CircleAlert className="h-4 w-4 shrink-0" /> You’ve used all {batchPostCount} posts for {monthName}.
+                {planLabel !== 'Pro' && (
+                  <button type="button" className="ml-auto font-semibold underline" onClick={onOpenBilling}>Upgrade to Pro</button>
+                )}
+              </div>
+            )}
+
+            {scheduleRange.minDay > 1 && scheduleRange.maxDay - scheduleRange.minDay + 1 <= 5 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-transparent bg-(--amber-soft) px-3.5 py-2.5 text-ui text-(--amber)" role="status">
+                <CircleAlert className="h-4 w-4 shrink-0" />
+                Only {scheduleRange.maxDay - scheduleRange.minDay + 1} day{scheduleRange.maxDay - scheduleRange.minDay === 0 ? '' : 's'} left in {monthName}.
+                <button type="button" className="ml-auto font-semibold underline" onClick={onPlanNextMonth} disabled={busy}>
+                  Plan {new Date(year, month + 1, 1).toLocaleDateString('en-PH', { month: 'long' })} instead
+                </button>
+              </div>
+            )}
+
+            <section className="space-y-2">
+              <label className={LABEL} htmlFor="pl-focus">Focus for {monthName}</label>
+              <div className="rounded-xl border border-(--border) bg-[color-mix(in_srgb,var(--bg-alt)_60%,transparent)] p-4 transition-colors focus-within:border-(--green) focus-within:ring-2 focus-within:ring-(--ring)">
+                <TextareaAutosize
+                  id="pl-focus"
+                  minRows={3}
+                  maxRows={8}
+                  value={batchStrategy}
+                  onChange={(e) => onStrategyChange(e.target.value)}
+                  disabled={busy}
+                  placeholder="e.g. “Undas promo for our ube pandesal” or “New branch in Cubao”"
+                  className="block w-full resize-none bg-transparent text-sm leading-relaxed outline-hidden placeholder:text-(--fg-subtle) disabled:opacity-60"
+                />
+              </div>
+              <p className="text-xs text-(--fg-muted)">Kawayan plans the month around this. Change it any time, then re-plan.</p>
+            </section>
+
+            <section className="space-y-2">
+              <span className={LABEL} id="pl-presets-label">Starting points</span>
+              <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby="pl-presets-label">
+                {STRATEGY_PRESETS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    aria-pressed={focus === s}
+                    disabled={busy}
+                    onClick={() => onStrategyChange(focus === s ? '' : s)}
+                    className={clsx(
+                      'h-[30px] rounded-full border px-3 text-ui transition-colors disabled:opacity-50',
+                      focus === s
+                        ? 'border-transparent bg-(--green-soft) font-medium text-(--green-ink)'
+                        : 'border-(--border) bg-(--card) text-(--fg) hover:bg-(--muted)',
+                    )}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="space-y-2">
+              <span className={LABEL} id="pl-count-label">How many posts?</span>
+              {maxPlanCount === 0 ? (
+                <p className="text-ui text-(--fg-muted)">
+                  {openDayCount === 0 ? `No open days left in ${monthName}.` : `No posts left in your plan for ${monthName}.`}
+                </p>
+              ) : (
+                <PostCountPicker
+                  value={planCount}
+                  max={maxPlanCount}
+                  onChange={onPlanCountChange}
+                  disabled={busy}
+                  openDays={openDays}
+                  takenDays={new Set(days.filter((d) => postStatusByDay[d]))}
+                  minDay={scheduleRange.minDay}
+                  daysInMonth={daysInMonth}
+                />
+              )}
+            </section>
+
+            <section className="space-y-3">
+              <span className={LABEL}>Your progress</span>
+              <ol className="space-y-3">
+                {flow.map((step, i) => (
+                  <li key={step.title} className="flex gap-3">
+                    <span
+                      className={clsx(
+                        'grid h-6 w-6 shrink-0 place-items-center rounded-full border text-xs font-semibold',
+                        step.state === 'done' && 'border-transparent bg-(--green) text-(--green-fg)',
+                        step.state === 'busy' && 'border-(--green) text-(--primary)',
+                        step.state === 'active' && 'border-(--green) text-(--primary)',
+                        step.state === 'todo' && 'border-(--border-strong) text-(--fg-subtle)',
+                      )}
+                    >
+                      {step.state === 'done' ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : step.state === 'busy' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : i + 1}
+                    </span>
+                    <span className="min-w-0 text-ui">
+                      <b className={clsx('block font-semibold', step.state === 'todo' && 'text-(--fg-muted)')}>{step.title}</b>
+                      <small className="block text-xs text-(--fg-muted)">{step.sub}</small>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+              <div className="rounded-xl border border-(--border) bg-(--card) p-3.5 text-ui leading-relaxed text-(--fg-muted)">
+                <p className="mb-1 flex items-center justify-between font-semibold text-(--fg)">
+                  Target dates <span className="mono text-(--fg)">{rangeText}</span>
+                </p>
+                {planCount} idea{planCount === 1 ? '' : 's'} across {openDays.length} open day{openDays.length === 1 ? '' : 's'}, one per day
+                {days.some((d) => postStatusByDay[d]) && ', around the days that already have posts'}. You can edit every idea before any post is made.
+              </div>
+            </section>
+          </aside>
+
+          {/* ── Multi-channel batch timeline ── */}
+          <main className="flex min-w-0 flex-col lg:min-h-0">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-5 sm:px-6" aria-live="polite">
+              <h3 className="text-sm font-semibold">
+                {planning ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-(--primary)" />
+                    Planning {planCount} idea{planCount === 1 ? '' : 's'}{focus ? ` around “${focus.length > 40 ? `${focus.slice(0, 40)}…` : focus}”` : ''}
+                  </span>
+                ) : ideas.length ? (
+                  <>{ideas.length} idea{ideas.length === 1 ? '' : 's'} <span className="font-normal text-(--fg-muted)">· {rangeText}</span></>
+                ) : (
+                  <>{monthName} on your channels</>
+                )}
+              </h3>
+            </div>
+            <div className="mx-5 mb-5 min-h-0 flex-1 overflow-y-auto rounded-2xl border border-(--border) bg-(--card) sm:mx-6">
+              <ChannelTimelineTrack
+                compact
+                currentDate={new Date(year, month, 1)}
+                posts={posts}
+                ideas={ideas}
+                accounts={accounts}
+                channels={channels}
+                failedIds={failedIds}
+                loading={false}
+                ghostDays={planning ? openDays : undefined}
+                renderIdea={renderIdea}
+                onOpenPost={(post) => onOpenDay(Number(post.date.slice(8, 10)))}
+                onEditPost={(post) => onOpenDay(Number(post.date.slice(8, 10)))}
+                onOpenDay={onOpenDay}
+              />
+            </div>
+          </main>
+        </div>
+
+        {/* ── Action bar ── */}
+        <footer className="flex flex-wrap items-center gap-3 border-t border-(--border) bg-(--card) px-5 py-3 sm:px-6">
+          <div className="min-w-0 flex-1 text-ui text-(--fg-muted) [&_b]:font-semibold [&_b]:text-(--fg)">
+            {creating ? (
+              <div className="flex flex-wrap items-center gap-3">
+                <span>
+                  <b>Writing post {Math.min(batchProgress!.current + 1, batchProgress!.total)} of {batchProgress!.total}</b> · captions and visuals
+                </span>
+                <ProgressBar done={batchProgress!.current} total={batchProgress!.total} running label="Writing progress" className="w-40" />
+              </div>
+            ) : planning ? (
+              <span>This takes about 15 seconds.</span>
+            ) : ideas.length === 0 ? (
+              <span>Ideas will be dated <b>{rangeText}</b> · {remaining} post{remaining === 1 ? '' : 's'} left in your plan this month.</span>
+            ) : createCount > 0 ? (
+              <span>
+                <b>{createCount} idea{createCount === 1 ? '' : 's'}</b> ready to become drafts · {monthlyPostCount} of {batchPostCount} posts used, {remaining} left
+              </span>
+            ) : withPosts >= ideas.length ? (
+              <span>Every idea has a post. Open any of them to edit or schedule.</span>
+            ) : (
+              <span>No posts left in your plan this month.</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {ideas.length === 0 ? (
+              <button type="button" className={PRIMARY_BTN} onClick={onGeneratePlan} disabled={busy || planCount === 0}>
+                {planning ? <Loader2 className="animate-spin" /> : <KawayanMark size={16} />}
+                {planning ? 'Planning…' : planCount ? `Plan ${planCount} idea${planCount === 1 ? '' : 's'}` : 'Nothing to plan'}
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={onGeneratePlan}
+                  disabled={busy || planCount === 0}
+                  className="inline-flex items-center gap-2 rounded-full border border-(--border-strong) px-4 py-2.5 text-sm font-semibold text-(--fg) transition-colors hover:bg-(--bg-alt) disabled:opacity-50"
+                >
+                  {planning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />} Re-plan
+                </button>
+                <button type="button" className={PRIMARY_BTN} onClick={onBatchGenerate} disabled={busy || createCount === 0 || trialLimitReached}>
+                  {creating ? <Loader2 className="animate-spin" /> : <KawayanMark size={16} />}
+                  {creating
+                    ? `Creating ${batchProgress!.current}/${batchProgress!.total}…`
+                    : createCount === 0
+                      ? 'Nothing new to create'
+                      : `Approve & create ${createCount} post${createCount === 1 ? '' : 's'}`}
+                </button>
+              </>
+            )}
+          </div>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
+export default PlanningModal;

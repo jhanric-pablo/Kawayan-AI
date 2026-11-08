@@ -1,0 +1,574 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { AnimatePresence, m, useAnimationControls } from 'motion/react';
+import { User, ViewState } from '../types';
+import UniversalDatabaseService from '../services/universalDatabaseService';
+import { ValidationService } from '../services/validationService';
+import { TOS_VERSION } from '../constants/termsOfService';
+import AuthShell from './auth/AuthShell';
+import AuthField from './auth/AuthField';
+import StepProgress from './auth/StepProgress';
+import PasswordMeter from './auth/PasswordMeter';
+import SignupStory from './auth/SignupStory';
+import {
+  ArrowRight, X, Eye, EyeOff, Loader2,
+  ShieldCheck, UploadCloud, Check, Wallet, KeyRound,
+} from 'lucide-react';
+
+interface Props {
+  onLogin: (user: User) => void | Promise<void>;
+  onNavigate: (view: ViewState) => void;
+  isAdminLogin?: boolean;
+  initialIsSignUp?: boolean;
+  darkMode?: boolean;
+  toggleTheme?: () => void;
+}
+
+const SIGNUP_STEPS = ['Account', 'Business', 'Verify'];
+
+const Login: React.FC<Props> = ({
+  onLogin,
+  onNavigate,
+  isAdminLogin = false,
+  initialIsSignUp = false,
+  darkMode = false,
+  toggleTheme,
+}) => {
+  const [isSignUp, setIsSignUp] = useState(initialIsSignUp);
+  const [step, setStep] = useState(0);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [businessName, setBusinessName] = useState('');
+  const [businessAddress, setBusinessAddress] = useState('');
+  const [businessPhone, setBusinessPhone] = useState('');
+  const [document, setDocument] = useState<File | null>(null);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [error, setError] = useState('');
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotMsg, setForgotMsg] = useState('');
+  const [forgotLink, setForgotLink] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [dbService] = useState(() => new UniversalDatabaseService());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const clearMessages = () => { setError(''); setValidationErrors([]); };
+
+  const lastStep = useRef(step);
+  const stepDir = step >= lastStep.current ? 1 : -1;
+  useEffect(() => { lastStep.current = step; }, [step]);
+
+  const shake = useAnimationControls();
+  useEffect(() => {
+    if (error || validationErrors.length) shake.start({ x: [0, -9, 8, -5, 4, 0], transition: { duration: 0.42 } });
+  }, [error, validationErrors, shake]);
+
+  const switchMode = (next: boolean) => {
+    setIsSignUp(next);
+    setStep(0);
+    setAcceptedTerms(false);
+    clearMessages();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+    if (!allowedTypes.includes(file.type)) {
+      setError('Only JPG, PNG, or PDF files are accepted.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError('File must be smaller than 5MB.');
+      return;
+    }
+    setError('');
+    setDocument(file);
+  };
+
+  /** Gate each wizard step so problems surface where they're fixable. */
+  const validateStep = (s: number): boolean => {
+    clearMessages();
+    if (s === 0) {
+      if (!email.trim() || !password) { setError('Email and password are required'); return false; }
+      const v = ValidationService.validatePassword(password);
+      if (!v.isValid) { setValidationErrors(v.errors); return false; }
+      return true;
+    }
+    if (s === 1) {
+      if (businessName.trim().length < 2) { setError('Business name must be at least 2 characters long'); return false; }
+      if (!businessAddress.trim()) { setError('Business address is required'); return false; }
+      if (!businessPhone.trim()) { setError('Business phone / contact number is required'); return false; }
+      return true;
+    }
+    if (!document) { setError("Please upload a business registration document (Mayor's Permit, DTI, or SEC Registration)."); return false; }
+    if (!acceptedTerms) { setError('You must read and accept the Terms of Service before creating an account.'); return false; }
+    return true;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // Sign-up: advance through the wizard until the last step.
+    if (isSignUp && !isAdminLogin && step < SIGNUP_STEPS.length - 1) {
+      if (validateStep(step)) setStep((s) => s + 1);
+      return;
+    }
+
+    clearMessages();
+    setIsLoading(true);
+
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedBusinessName = businessName.trim();
+
+    try {
+      if (!trimmedEmail || !password) {
+        setError('Email and password are required');
+        setIsLoading(false);
+        return;
+      }
+
+      if (isSignUp && !isAdminLogin) {
+        const passwordValidation = ValidationService.validatePassword(password);
+        if (!passwordValidation.isValid) {
+          setValidationErrors(passwordValidation.errors);
+          setIsLoading(false);
+          return;
+        }
+        if (!trimmedBusinessName || trimmedBusinessName.length < 2) {
+          setError('Business name must be at least 2 characters long');
+          setIsLoading(false);
+          return;
+        }
+        if (!businessAddress.trim()) {
+          setError('Business address is required');
+          setIsLoading(false);
+          return;
+        }
+        if (!businessPhone.trim()) {
+          setError('Business phone / contact number is required');
+          setIsLoading(false);
+          return;
+        }
+        if (!document) {
+          setError("Please upload a business registration document (Mayor's Permit, DTI, or SEC Registration).");
+          setIsLoading(false);
+          return;
+        }
+        if (!acceptedTerms) {
+          setError('You must read and accept the Terms of Service before creating an account.');
+          setIsLoading(false);
+          return;
+        }
+
+        const newUser = await dbService.createUser(
+          trimmedEmail,
+          password,
+          'user',
+          trimmedBusinessName,
+          { acceptedTerms: true, termsVersion: TOS_VERSION }
+        );
+
+        if (!newUser) {
+          setError('Registration failed. Please try again.');
+          setIsLoading(false);
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append('userId', newUser.id);
+        formData.append('businessAddress', businessAddress.trim());
+        formData.append('businessPhone', businessPhone.trim());
+        formData.append('document', document);
+
+        const token = localStorage.getItem('kawayan_jwt');
+        const verifRes = await fetch('/api/verification/submit', {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: formData,
+        });
+
+        if (!verifRes.ok) {
+          console.warn('Verification doc upload failed (non-fatal):', await verifRes.text());
+        }
+
+        onLogin({ ...newUser, verificationStatus: 'pending' });
+      } else {
+        const result = await dbService.loginUser(trimmedEmail, password);
+
+        if (result && result.user) {
+          if (isAdminLogin && result.user.role !== 'admin' && result.user.role !== 'support') {
+            setError('Access denied. Use the main Login page for SME accounts.');
+            await dbService.logoutUser();
+          } else {
+            await onLogin(result.user);
+          }
+        } else {
+          setError('Invalid email or password.');
+        }
+      }
+    } catch (err: any) {
+      console.error('Login/Signup error:', err);
+      setError(err.message || 'An error occurred. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleForgot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setForgotMsg('');
+    setForgotLink('');
+    setForgotLoading(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: forgotEmail.trim().toLowerCase() }),
+        signal: controller.signal,
+      });
+      const data = await res.json();
+      setForgotMsg(data.message || 'If that email exists, a reset link has been sent.');
+      if (data.devResetUrl) setForgotLink(data.devResetUrl);
+    } catch (err: any) {
+      setForgotMsg(err?.name === 'AbortError' ? 'Request timed out. Please try again.' : 'Network error. Please try again.');
+    } finally {
+      clearTimeout(timeout);
+      setForgotLoading(false);
+    }
+  };
+
+  const eyeToggle = (
+    <button
+      type="button"
+      className="ax-eye"
+      tabIndex={-1}
+      onClick={() => setShowPassword((s) => !s)}
+      aria-label={showPassword ? 'Hide password' : 'Show password'}
+    >
+      <AnimatePresence mode="wait" initial={false}>
+        <m.span
+          key={showPassword ? 'hide' : 'show'}
+          className="grid"
+          initial={{ opacity: 0, rotate: -60, scale: 0.6 }}
+          animate={{ opacity: 1, rotate: 0, scale: 1 }}
+          exit={{ opacity: 0, rotate: 60, scale: 0.6 }}
+          transition={{ duration: 0.16 }}
+        >
+          {showPassword ? <EyeOff /> : <Eye />}
+        </m.span>
+      </AnimatePresence>
+    </button>
+  );
+
+  // Errors slide open under the fields instead of popping in.
+  const reveal = { initial: { opacity: 0, height: 0 }, animate: { opacity: 1, height: 'auto' }, exit: { opacity: 0, height: 0 }, transition: { duration: 0.22 } };
+  const messages = (
+    <AnimatePresence initial={false}>
+      {validationErrors.length > 0 && (
+        <m.div key="pw" {...reveal} className="overflow-hidden">
+          <div className="ax-error">
+            <strong>Password needs</strong>
+            <ul>{validationErrors.map((err, i) => <li key={i}>{err}</li>)}</ul>
+          </div>
+        </m.div>
+      )}
+      {error && (
+        <m.div key="err" {...reveal} className="overflow-hidden">
+          <div className="ax-error">{error}</div>
+        </m.div>
+      )}
+    </AnimatePresence>
+  );
+
+  // Email + password: the whole sign-in form, and step 1 of sign-up.
+  const accountFields = (
+    <>
+      <AuthField
+        id="af-email"
+        label="Email address"
+        placeholder="you@yourshop.ph"
+        type="email"
+        inputMode="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        required
+        autoComplete="email"
+      />
+      <AuthField
+        id="af-pw"
+        label="Password"
+        type={showPassword ? 'text' : 'password'}
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        required
+        autoComplete={isSignUp ? 'new-password' : 'current-password'}
+        trailing={eyeToggle}
+        labelAside={!isSignUp && !isAdminLogin ? (
+          <button type="button" className="ax-label-link" onClick={() => { setForgotMode(true); setForgotEmail(email); clearMessages(); }}>
+            Forgot password?
+          </button>
+        ) : undefined}
+      />
+      {isSignUp && !isAdminLogin && <PasswordMeter password={password} />}
+    </>
+  );
+
+  /* ── Heading copy per mode ── */
+  const heading = forgotMode
+    ? { title: 'Reset your password', sub: 'We’ll email you a secure link to set a new one.' }
+    : isAdminLogin
+      ? { title: 'Staff sign in', sub: 'Admin and support accounts only.' }
+      : isSignUp
+        ? {
+            title: 'Create your account',
+            sub: <>Already have an account? <button type="button" className="ax__switch" onClick={() => switchMode(false)}>Sign in</button></>,
+          }
+        : {
+            title: 'Welcome back',
+            sub: <>New to Kawayan? <button type="button" className="ax__switch" onClick={() => switchMode(true)}>Create an account</button></>,
+          };
+
+  // Staff sign-in gets none of the customer-facing conversion signals.
+  const footer = isAdminLogin ? (
+    <div className="ax__foot">
+      <span className="ax__foot-item"><ShieldCheck /> Access is logged and monitored</span>
+    </div>
+  ) : (
+    <div className="ax__foot">
+      <span className="ax-or">Kept safe</span>
+      <span className="ax__foot-item"><KeyRound /> Passwords are hashed, never stored as text</span>
+      <span className="ax__foot-item"><Check /> Business permits checked by hand</span>
+      <span className="ax__foot-item"><Wallet /> No credit card to start</span>
+      {!isSignUp && !forgotMode && (
+        <button type="button" className="ax-link mt-1" onClick={() => onNavigate(ViewState.ADMIN_LOGIN)}>Staff sign in</button>
+      )}
+    </div>
+  );
+
+
+  return (
+    <AuthShell
+      onBack={() => onNavigate(ViewState.LANDING)}
+      title={heading.title}
+      subtitle={heading.sub}
+      darkMode={darkMode}
+      toggleTheme={toggleTheme}
+      footer={footer}
+      aside={isSignUp && !isAdminLogin && !forgotMode ? <SignupStory key="story" /> : undefined}
+      headerExtra={isSignUp && !isAdminLogin && !forgotMode ? <StepProgress steps={SIGNUP_STEPS} current={step} /> : undefined}
+      barAction={isSignUp && !isAdminLogin && !forgotMode ? { label: 'Log in instead', onClick: () => switchMode(false) } : undefined}
+    >
+      {/* ── Forgot password ── */}
+      {forgotMode ? (
+        <form onSubmit={handleForgot} className="ax-form">
+          <AuthField
+            id="af-forgot-email"
+            label="Email address"
+            placeholder="you@yourshop.ph"
+            type="email"
+            inputMode="email"
+            value={forgotEmail}
+            onChange={(e) => setForgotEmail(e.target.value)}
+            required
+            autoFocus
+            autoComplete="email"
+          />
+
+          {forgotMsg && <div className="ax-error">{forgotMsg}</div>}
+          {forgotLink && (
+            <div className="ax-error">
+              Dev link (no mailer configured): <a href={forgotLink}>{forgotLink}</a>
+            </div>
+          )}
+
+          <div className="ax-actions">
+            <button type="submit" className="ax-btn ax-btn--primary" disabled={forgotLoading}>
+              <span>{forgotLoading ? 'Sending…' : 'Send reset link'}</span>
+              {!forgotLoading && <ArrowRight />}
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className="ax-link"
+            onClick={() => { setForgotMode(false); setForgotMsg(''); setForgotLink(''); }}
+          >
+            ← Back to sign in
+          </button>
+        </form>
+      ) : (
+        <>
+          <m.form onSubmit={handleSubmit} className="ax-form" animate={shake}>
+            {/* Sign in ⇄ sign up: the old fields lift out, the new ones settle in. */}
+            <AnimatePresence mode="wait" initial={false}>
+            <m.div
+              key={isSignUp && !isAdminLogin ? 'up' : 'in'}
+              className="ax-form"
+              initial={{ opacity: 0, y: 12, filter: 'blur(4px)' }}
+              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, y: -10, filter: 'blur(4px)' }}
+              transition={{ duration: 0.24, ease: [0.2, 0.8, 0.2, 1] }}
+            >
+            {isSignUp && !isAdminLogin ? (
+              /* Submit (Continue / Enter) drives the steps and their validation; the header shows progress. */
+              <AnimatePresence mode="wait" initial={false} custom={stepDir}>
+              <m.div
+                key={step}
+                custom={stepDir}
+                variants={{
+                  enter: (d: number) => ({ opacity: 0, x: 28 * d }),
+                  center: { opacity: 1, x: 0 },
+                  exit: (d: number) => ({ opacity: 0, x: -28 * d }),
+                }}
+                initial="enter"
+                animate="center"
+                exit="exit"
+                transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+              >
+                {step === 0 && <div className="ax-form">{accountFields}</div>}
+
+                {step === 1 && (
+                  <div className="ax-form">
+                    <AuthField
+                      id="af-biz"
+                      label="Business name"
+                      placeholder="e.g. Tindahan ni Aling Rosa"
+                      value={businessName}
+                      onChange={(e) => setBusinessName(e.target.value)}
+                      required
+                      autoFocus
+                      autoComplete="organization"
+                    />
+                    <AuthField
+                      id="af-addr"
+                      label="Business address"
+                      placeholder="Street, barangay, city"
+                      value={businessAddress}
+                      onChange={(e) => setBusinessAddress(e.target.value)}
+                      required
+                      autoComplete="street-address"
+                    />
+                    <AuthField
+                      id="af-phone"
+                      label="Contact number"
+                      placeholder="0917 123 4567"
+                      type="tel"
+                      inputMode="tel"
+                      value={businessPhone}
+                      onChange={(e) => setBusinessPhone(e.target.value)}
+                      required
+                      autoComplete="tel"
+                    />
+                  </div>
+                )}
+
+                {step === 2 && (
+                  <div className="ax-form">
+                    <div className="ax-doc">
+                      <span className="ax-doc__label"><ShieldCheck /> Business permit</span>
+                      {document ? (
+                        <div className="ax-doc__chip">
+                          <Check className="ax-doc__ok" />
+                          <span>{document.name}</span>
+                          <button
+                            type="button"
+                            aria-label="Remove file"
+                            onClick={() => { setDocument(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button type="button" className="ax-doc__add" onClick={() => fileInputRef.current?.click()}>
+                          <UploadCloud /> Attach Mayor&apos;s Permit / DTI / SEC
+                        </button>
+                      )}
+                      <p className="ax-doc__hint">JPG, PNG or PDF · max 5&nbsp;MB</p>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".jpg,.jpeg,.png,.pdf"
+                        hidden
+                        onChange={handleFileChange}
+                      />
+                    </div>
+
+                    <label className="ax-tos">
+                      <input
+                        type="checkbox"
+                        checked={acceptedTerms}
+                        onChange={(e) => setAcceptedTerms(e.target.checked)}
+                      />
+                      <span>
+                        I agree to the{' '}
+                        <a href="/terms" target="_blank" rel="noopener">Terms of Service</a>{' '}
+                        and{' '}
+                        <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+                        . Verification is required before full platform access.
+                      </span>
+                    </label>
+                  </div>
+                )}
+              </m.div>
+              </AnimatePresence>
+            ) : (
+              accountFields
+            )}
+            </m.div>
+            </AnimatePresence>
+
+            {messages}
+
+            <div className="ax-actions">
+              {isSignUp && !isAdminLogin && step > 0 && (
+                <m.button
+                  type="button"
+                  className="ax-btn ax-btn--ghost"
+                  whileTap={{ scale: 0.97 }}
+                  onClick={() => { clearMessages(); setStep((s) => s - 1); }}
+                >
+                  Back
+                </m.button>
+              )}
+              <m.button type="submit" className="ax-btn ax-btn--primary" disabled={isLoading} whileTap={{ scale: 0.97 }}>
+                <AnimatePresence mode="wait" initial={false}>
+                  <m.span
+                    key={isLoading ? 'busy' : `${isSignUp}-${step}`}
+                    className="inline-flex items-center gap-2"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    transition={{ duration: 0.15 }}
+                  >
+                    {isLoading && <Loader2 className="animate-spin" aria-hidden />}
+                    {isLoading
+                      ? (isSignUp && !isAdminLogin ? 'Creating your account…' : 'Signing in…')
+                      : isSignUp && !isAdminLogin
+                        ? (step < SIGNUP_STEPS.length - 1 ? 'Continue' : 'Create account')
+                        : 'Sign in'}
+                    {!isLoading && <ArrowRight />}
+                  </m.span>
+                </AnimatePresence>
+              </m.button>
+            </div>
+
+
+            {isAdminLogin && (
+              <button type="button" className="ax-link" onClick={() => onNavigate(ViewState.LOGIN)}>
+                ← Back to user login
+              </button>
+            )}
+
+          </m.form>
+        </>
+      )}
+    </AuthShell>
+  );
+};
+
+export default Login;
